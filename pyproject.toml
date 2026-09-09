@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agente-universitario"
+version = "0.1.0"
+description = "Personal academic automation assistant (Agente U)."
+requires-python = ">=3.11"
+readme = "README.md"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
