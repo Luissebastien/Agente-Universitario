@@ -7,6 +7,17 @@ from moodle.exceptions import (
     MoodleHTTPError,
     MoodleUntrustedURLError,
 )
+from moodle.models import (
+    Assignment,
+    CalendarEvent,
+    Course,
+    CourseFile,
+    CourseModule,
+    CourseSection,
+    Grade,
+    MoodleUser,
+)
+from moodle.sync import MoodleSync
 
 __all__ = [
     "MoodleClient",
@@ -16,4 +27,13 @@ __all__ = [
     "MoodleAPIError",
     "MoodleAuthenticationError",
     "MoodleUntrustedURLError",
+    "MoodleSync",
+    "MoodleUser",
+    "Course",
+    "CourseSection",
+    "CourseModule",
+    "CourseFile",
+    "Assignment",
+    "Grade",
+    "CalendarEvent",
 ]
