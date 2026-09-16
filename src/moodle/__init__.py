@@ -9,6 +9,7 @@ from moodle.exceptions import (
 )
 from moodle.models import (
     Assignment,
+    AssignmentSubmissionStatus,
     CalendarEvent,
     Course,
     CourseFile,
@@ -34,6 +35,7 @@ __all__ = [
     "CourseModule",
     "CourseFile",
     "Assignment",
+    "AssignmentSubmissionStatus",
     "Grade",
     "CalendarEvent",
 ]

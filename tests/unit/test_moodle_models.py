@@ -2,6 +2,7 @@ import unittest
 
 from moodle.models import (
     Assignment,
+    AssignmentSubmissionStatus,
     CalendarEvent,
     Course,
     CourseFile,
@@ -107,11 +108,49 @@ class AssignmentModelTests(unittest.TestCase):
         self.assertEqual(assignment.grade, 10)
 
 
+class AssignmentSubmissionStatusModelTests(unittest.TestCase):
+    def test_from_moodle_with_submission(self) -> None:
+        status = AssignmentSubmissionStatus.from_moodle(
+            104926,
+            {
+                "lastattempt": {
+                    "gradingstatus": "notgraded",
+                    "cansubmit": False,
+                    "submission": {"status": "new", "timemodified": 1786795183},
+                },
+            },
+        )
+        self.assertEqual(status.assignment_id, 104926)
+        self.assertEqual(status.submission_status, "new")
+        self.assertEqual(status.grading_status, "notgraded")
+        self.assertFalse(status.cansubmit)
+        self.assertEqual(status.submitted_at, 1786795183)
+
+    def test_from_moodle_without_submission_object(self) -> None:
+        # Real Moodle response for an assignment with no attempt yet: no
+        # 'submission' key at all inside lastattempt.
+        status = AssignmentSubmissionStatus.from_moodle(
+            91719,
+            {"lastattempt": {"gradingstatus": "notgraded", "cansubmit": False}},
+        )
+        self.assertIsNone(status.submission_status)
+        self.assertIsNone(status.submitted_at)
+        self.assertEqual(status.grading_status, "notgraded")
+
+    def test_from_moodle_with_missing_lastattempt(self) -> None:
+        status = AssignmentSubmissionStatus.from_moodle(1, {})
+        self.assertIsNone(status.grading_status)
+        self.assertIsNone(status.submission_status)
+
+
 class GradeModelTests(unittest.TestCase):
     def test_from_moodle(self) -> None:
         grade = Grade.from_moodle(
             4409,
+            15465,
             {
+                "id": 185067,
+                "cmid": 905633,
                 "itemname": "Tarea #1 de ED",
                 "itemtype": "mod",
                 "itemmodule": "assign",
@@ -120,9 +159,19 @@ class GradeModelTests(unittest.TestCase):
                 "percentageformatted": "0,00 %",
             },
         )
+        self.assertEqual(grade.id, 185067)
         self.assertEqual(grade.course_id, 4409)
+        self.assertEqual(grade.user_id, 15465)
+        self.assertEqual(grade.cmid, 905633)
         self.assertEqual(grade.item_module, "assign")
         self.assertEqual(grade.grade_raw, 0)
+
+    def test_course_level_item_has_no_cmid(self) -> None:
+        grade = Grade.from_moodle(
+            4409, 15465, {"id": 43466, "itemtype": "course", "graderaw": None}
+        )
+        self.assertIsNone(grade.cmid)
+        self.assertIsNone(grade.item_module)
 
 
 class CalendarEventModelTests(unittest.TestCase):
@@ -131,22 +180,35 @@ class CalendarEventModelTests(unittest.TestCase):
             {
                 "id": 807162,
                 "name": "Vencimiento de Tarea #1 de ED",
+                "description": "<p>valor de 10 puntos.</p>",
                 "eventtype": "due",
                 "modulename": "assign",
                 "instance": 905633,
                 "timestart": 1786852500,
+                "timesort": 1786852500,
+                "timeduration": 0,
                 "course": {"id": 4409, "fullname": "ECUACIONES DIFERENCIALES"},
             }
         )
         self.assertEqual(event.id, 807162)
         self.assertEqual(event.course_id, 4409)
         self.assertEqual(event.eventtype, "due")
+        self.assertEqual(event.description, "valor de 10 puntos.")
+        self.assertEqual(event.timesort, 1786852500)
+        self.assertEqual(event.timeduration, 0)
 
     def test_from_moodle_without_course(self) -> None:
         event = CalendarEvent.from_moodle(
             {"id": 1, "name": "x", "eventtype": "due", "timestart": 0}
         )
         self.assertIsNone(event.course_id)
+        self.assertIsNone(event.description)
+
+    def test_from_moodle_without_description(self) -> None:
+        event = CalendarEvent.from_moodle(
+            {"id": 1, "name": "x", "eventtype": "due", "timestart": 0, "description": ""}
+        )
+        self.assertIsNone(event.description)
 
 
 if __name__ == "__main__":

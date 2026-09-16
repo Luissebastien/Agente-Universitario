@@ -2,7 +2,17 @@ import unittest
 
 from database.db import connect
 from database import moodle_repository as repo
-from moodle.models import Course, CourseFile, CourseModule, CourseSection, MoodleUser
+from moodle.models import (
+    Assignment,
+    AssignmentSubmissionStatus,
+    CalendarEvent,
+    Course,
+    CourseFile,
+    CourseModule,
+    CourseSection,
+    Grade,
+    MoodleUser,
+)
 
 
 class RepositoryTestCase(unittest.TestCase):
@@ -107,6 +117,189 @@ class UpsertSectionsModulesFilesTests(RepositoryTestCase):
         self.assertEqual(len(modules), 1)
         self.assertEqual(modules[0]["id"], 100)
         self.assertEqual(repo.get_course_modules(self.conn, course_id=999), [])
+
+
+class UpsertAssignmentsTests(RepositoryTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        repo.upsert_courses(
+            self.conn,
+            [Course(id=4409, shortname="a", fullname="A", category=None, visible=True,
+                    progress=None, startdate=None, enddate=None)],
+        )
+
+    def test_upsert_twice_is_idempotent(self) -> None:
+        assignment = Assignment(id=104926, course_id=4409, name="Tarea #1", duedate=1,
+                                 allowsubmissionsfromdate=1, cutoffdate=0, grade=10)
+        repo.upsert_assignments(self.conn, [assignment])
+        repo.upsert_assignments(self.conn, [assignment])
+
+        rows = repo.get_assignments(self.conn, course_id=4409)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], "Tarea #1")
+
+    def test_update_changes_duedate(self) -> None:
+        repo.upsert_assignments(
+            self.conn,
+            [Assignment(id=1, course_id=4409, name="x", duedate=100,
+                        allowsubmissionsfromdate=None, cutoffdate=None, grade=None)],
+        )
+        repo.upsert_assignments(
+            self.conn,
+            [Assignment(id=1, course_id=4409, name="x", duedate=200,
+                        allowsubmissionsfromdate=None, cutoffdate=None, grade=None)],
+        )
+
+        row = self.conn.execute("SELECT duedate FROM assignments WHERE id = 1").fetchone()
+        self.assertEqual(row["duedate"], 200)
+
+    def test_get_assignments_filters_by_course(self) -> None:
+        repo.upsert_courses(
+            self.conn,
+            [Course(id=9999, shortname="b", fullname="B", category=None, visible=True,
+                    progress=None, startdate=None, enddate=None)],
+        )
+        repo.upsert_assignments(
+            self.conn,
+            [
+                Assignment(id=1, course_id=4409, name="x", duedate=None,
+                           allowsubmissionsfromdate=None, cutoffdate=None, grade=None),
+                Assignment(id=2, course_id=9999, name="y", duedate=None,
+                           allowsubmissionsfromdate=None, cutoffdate=None, grade=None),
+            ],
+        )
+        self.assertEqual(len(repo.get_assignments(self.conn, course_id=4409)), 1)
+        self.assertEqual(len(repo.get_assignments(self.conn, course_id=9999)), 1)
+
+
+class UpsertAssignmentSubmissionStatusTests(RepositoryTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        repo.upsert_courses(
+            self.conn,
+            [Course(id=4409, shortname="a", fullname="A", category=None, visible=True,
+                    progress=None, startdate=None, enddate=None)],
+        )
+        repo.upsert_assignments(
+            self.conn,
+            [Assignment(id=1, course_id=4409, name="x", duedate=None,
+                        allowsubmissionsfromdate=None, cutoffdate=None, grade=None)],
+        )
+
+    def test_upsert_twice_is_idempotent(self) -> None:
+        status = AssignmentSubmissionStatus(
+            assignment_id=1, submission_status="new", grading_status="notgraded",
+            cansubmit=True, submitted_at=123,
+        )
+        repo.upsert_assignment_submission_status(self.conn, status)
+        repo.upsert_assignment_submission_status(self.conn, status)
+
+        rows = self.conn.execute("SELECT * FROM assignment_submission_status").fetchall()
+        self.assertEqual(len(rows), 1)
+
+    def test_update_reflects_grading_status_change(self) -> None:
+        repo.upsert_assignment_submission_status(
+            self.conn,
+            AssignmentSubmissionStatus(assignment_id=1, submission_status="new",
+                                        grading_status="notgraded", cansubmit=True,
+                                        submitted_at=None),
+        )
+        repo.upsert_assignment_submission_status(
+            self.conn,
+            AssignmentSubmissionStatus(assignment_id=1, submission_status="submitted",
+                                        grading_status="graded", cansubmit=False,
+                                        submitted_at=456),
+        )
+
+        row = repo.get_assignment_submission_status(self.conn, assignment_id=1)
+        self.assertEqual(row["grading_status"], "graded")
+        self.assertEqual(row["submitted_at"], 456)
+
+    def test_get_missing_status_returns_none(self) -> None:
+        self.assertIsNone(repo.get_assignment_submission_status(self.conn, assignment_id=999))
+
+
+class UpsertGradesTests(RepositoryTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        repo.upsert_courses(
+            self.conn,
+            [Course(id=4409, shortname="a", fullname="A", category=None, visible=True,
+                    progress=None, startdate=None, enddate=None)],
+        )
+        repo.upsert_user(self.conn, MoodleUser(id=15465, username="u", fullname="U"))
+
+    def test_upsert_twice_is_idempotent(self) -> None:
+        grade = Grade(id=185067, course_id=4409, user_id=15465, cmid=905633,
+                       item_name="Tarea #1", item_type="mod", item_module="assign",
+                       grade_raw=0.0, grade_formatted="0,00", percentage_formatted="0,00 %")
+        repo.upsert_grades(self.conn, [grade])
+        repo.upsert_grades(self.conn, [grade])
+
+        rows = repo.get_grades(self.conn, course_id=4409)
+        self.assertEqual(len(rows), 1)
+
+    def test_grade_value_update_is_reflected(self) -> None:
+        repo.upsert_grades(
+            self.conn,
+            [Grade(id=1, course_id=4409, user_id=15465, cmid=None, item_name="x",
+                   item_type="mod", item_module="assign", grade_raw=None,
+                   grade_formatted="-", percentage_formatted="-")],
+        )
+        repo.upsert_grades(
+            self.conn,
+            [Grade(id=1, course_id=4409, user_id=15465, cmid=None, item_name="x",
+                   item_type="mod", item_module="assign", grade_raw=10.0,
+                   grade_formatted="10,00", percentage_formatted="100,00 %")],
+        )
+
+        row = self.conn.execute("SELECT grade_raw FROM grades WHERE id = 1").fetchone()
+        self.assertEqual(row["grade_raw"], 10.0)
+
+
+class UpsertCalendarEventsTests(RepositoryTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        repo.upsert_courses(
+            self.conn,
+            [Course(id=4409, shortname="a", fullname="A", category=None, visible=True,
+                    progress=None, startdate=None, enddate=None)],
+        )
+
+    def test_upsert_twice_is_idempotent(self) -> None:
+        event = CalendarEvent(id=807162, course_id=4409, name="Vencimiento", description=None,
+                               eventtype="due", modulename="assign", instance=905633,
+                               timestart=1, timesort=1, timeduration=0)
+        repo.upsert_calendar_events(self.conn, [event])
+        repo.upsert_calendar_events(self.conn, [event])
+
+        rows = repo.get_calendar_events(self.conn, course_id=4409)
+        self.assertEqual(len(rows), 1)
+
+    def test_event_without_course_is_persisted(self) -> None:
+        event = CalendarEvent(id=1, course_id=None, name="Global event", description=None,
+                               eventtype="site", modulename=None, instance=None,
+                               timestart=1, timesort=1, timeduration=0)
+        repo.upsert_calendar_events(self.conn, [event])
+
+        all_events = repo.get_calendar_events(self.conn)
+        self.assertEqual(len(all_events), 1)
+        self.assertIsNone(all_events[0]["course_id"])
+
+    def test_get_calendar_events_filters_by_course(self) -> None:
+        repo.upsert_calendar_events(
+            self.conn,
+            [
+                CalendarEvent(id=1, course_id=4409, name="a", description=None, eventtype="due",
+                              modulename=None, instance=None, timestart=1, timesort=1,
+                              timeduration=0),
+                CalendarEvent(id=2, course_id=None, name="b", description=None, eventtype="site",
+                              modulename=None, instance=None, timestart=2, timesort=2,
+                              timeduration=0),
+            ],
+        )
+        self.assertEqual(len(repo.get_calendar_events(self.conn, course_id=4409)), 1)
+        self.assertEqual(len(repo.get_calendar_events(self.conn)), 2)
 
 
 if __name__ == "__main__":

@@ -2,7 +2,9 @@ import unittest
 from unittest.mock import MagicMock
 
 from database.db import connect
+from database import moodle_repository as repo
 from moodle.client import MoodleClient
+from moodle.models import MoodleUser
 from moodle.sync import MoodleSync
 
 SITE_INFO = {"userid": 15465, "username": "1130421", "fullname": "LUIS JIMENEZ"}
@@ -56,6 +58,59 @@ RAW_CONTENTS = [
         ],
     }
 ]
+
+
+RAW_ASSIGNMENTS_RESPONSE = {
+    "courses": [
+        {
+            "id": 4409,
+            "assignments": [
+                {"id": 104926, "name": "Tarea #1 de ED", "duedate": 1786852500,
+                 "allowsubmissionsfromdate": 1786407000, "cutoffdate": 0, "grade": 10},
+            ],
+        },
+        {"id": 22055, "assignments": []},
+    ],
+}
+
+RAW_SUBMISSION_STATUS_RESPONSE = {
+    "lastattempt": {
+        "gradingstatus": "notgraded",
+        "cansubmit": False,
+        "submission": {"status": "new", "timemodified": 1786795183},
+    },
+}
+
+RAW_GRADE_ITEMS_RESPONSE = {
+    "usergrades": [
+        {
+            "courseid": 4409,
+            "userid": 15465,
+            "gradeitems": [
+                {"id": 185067, "cmid": 905633, "itemname": "Tarea #1 de ED", "itemtype": "mod",
+                 "itemmodule": "assign", "graderaw": 0, "gradeformatted": "0,00",
+                 "percentageformatted": "0,00 %"},
+                {"id": 43466, "itemtype": "course", "graderaw": None,
+                 "gradeformatted": "-", "percentageformatted": "-"},
+            ],
+        },
+    ],
+}
+
+RAW_CALENDAR_RESPONSE = {
+    "groupedbycourse": [
+        {
+            "courseid": 4409,
+            "events": [
+                {"id": 807162, "name": "Vencimiento de Tarea #1 de ED", "description": "<p>x</p>",
+                 "eventtype": "due", "modulename": "assign", "instance": 905633,
+                 "timestart": 1786852500, "timesort": 1786852500, "timeduration": 0,
+                 "course": {"id": 4409}},
+            ],
+        },
+        {"courseid": 22055, "events": []},
+    ],
+}
 
 
 def make_client(**overrides) -> MagicMock:
@@ -136,6 +191,165 @@ class MoodleSyncTests(unittest.TestCase):
 
         self.assertEqual(len(self.conn.execute("SELECT * FROM course_modules").fetchall()), 2)
         self.assertEqual(len(self.conn.execute("SELECT * FROM course_files").fetchall()), 1)
+
+
+class SyncAssignmentsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.conn = connect(":memory:")
+
+    def tearDown(self) -> None:
+        self.conn.close()
+
+    def test_sync_assignments_persists_only_nonempty_courses(self) -> None:
+        client = make_client(call=RAW_ASSIGNMENTS_RESPONSE)
+        sync = MoodleSync(client, self.conn)
+        sync.sync_courses(user_id=15465)
+
+        assignments = sync.sync_assignments([4409, 22055])
+
+        self.assertEqual(len(assignments), 1)
+        self.assertEqual(assignments[0].id, 104926)
+        client.call.assert_called_once_with(
+            "mod_assign_get_assignments", {"courseids": [4409, 22055]}
+        )
+
+    def test_sync_assignments_defaults_course_ids_from_repository(self) -> None:
+        client = make_client(call=RAW_ASSIGNMENTS_RESPONSE)
+        sync = MoodleSync(client, self.conn)
+        sync.sync_courses(user_id=15465)  # persists courses 4409 and 22055
+
+        sync.sync_assignments()
+
+        called_args = client.call.call_args[0][1]
+        self.assertEqual(sorted(called_args["courseids"]), [4409, 22055])
+
+    def test_sync_assignments_twice_is_idempotent(self) -> None:
+        client = make_client(call=RAW_ASSIGNMENTS_RESPONSE)
+        sync = MoodleSync(client, self.conn)
+        sync.sync_courses(user_id=15465)
+
+        sync.sync_assignments([4409])
+        sync.sync_assignments([4409])
+
+        rows = self.conn.execute("SELECT * FROM assignments").fetchall()
+        self.assertEqual(len(rows), 1)
+
+    def test_sync_assignments_with_no_courses_does_nothing(self) -> None:
+        client = make_client()
+        sync = MoodleSync(client, self.conn)
+
+        result = sync.sync_assignments([])
+
+        self.assertEqual(result, [])
+        client.call.assert_not_called()
+
+
+class SyncAssignmentSubmissionStatusTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.conn = connect(":memory:")
+        repo_setup_client = make_client(call=RAW_ASSIGNMENTS_RESPONSE)
+        self.sync = MoodleSync(repo_setup_client, self.conn)
+        self.sync.sync_courses(user_id=15465)
+        self.sync.sync_assignments([4409])
+
+    def tearDown(self) -> None:
+        self.conn.close()
+
+    def test_sync_submission_status_persists_and_is_idempotent(self) -> None:
+        self.sync._client.call.return_value = RAW_SUBMISSION_STATUS_RESPONSE
+
+        status = self.sync.sync_assignment_submission_status(104926)
+        self.sync.sync_assignment_submission_status(104926)
+
+        self.assertEqual(status.submission_status, "new")
+        rows = self.conn.execute("SELECT * FROM assignment_submission_status").fetchall()
+        self.assertEqual(len(rows), 1)
+        self.sync._client.call.assert_called_with(
+            "mod_assign_get_submission_status", {"assignid": 104926}
+        )
+
+
+class SyncGradesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.conn = connect(":memory:")
+
+    def tearDown(self) -> None:
+        self.conn.close()
+
+    def test_sync_grades_persists_items_and_skips_none_userid_lookup(self) -> None:
+        client = make_client(call=RAW_GRADE_ITEMS_RESPONSE)
+        sync = MoodleSync(client, self.conn)
+        repo.upsert_user(self.conn, MoodleUser(id=15465, username="u", fullname="U"))
+        sync.sync_courses(user_id=15465)
+
+        grades = sync.sync_grades(4409, user_id=15465)
+
+        self.assertEqual(len(grades), 2)
+        client.call.assert_called_once_with(
+            "gradereport_user_get_grade_items", {"courseid": 4409, "userid": 15465}
+        )
+        client.get_site_info.assert_not_called()  # user_id was given explicitly
+
+    def test_sync_grades_looks_up_userid_when_not_given(self) -> None:
+        client = make_client(call=RAW_GRADE_ITEMS_RESPONSE)
+        sync = MoodleSync(client, self.conn)
+        repo.upsert_user(self.conn, MoodleUser(id=15465, username="u", fullname="U"))
+        sync.sync_courses(user_id=15465)
+
+        sync.sync_grades(4409)
+
+        client.get_site_info.assert_called_once()
+
+    def test_sync_grades_twice_is_idempotent(self) -> None:
+        client = make_client(call=RAW_GRADE_ITEMS_RESPONSE)
+        sync = MoodleSync(client, self.conn)
+        repo.upsert_user(self.conn, MoodleUser(id=15465, username="u", fullname="U"))
+        sync.sync_courses(user_id=15465)
+
+        sync.sync_grades(4409, user_id=15465)
+        sync.sync_grades(4409, user_id=15465)
+
+        rows = self.conn.execute("SELECT * FROM grades").fetchall()
+        self.assertEqual(len(rows), 2)
+
+
+class SyncCalendarTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.conn = connect(":memory:")
+
+    def tearDown(self) -> None:
+        self.conn.close()
+
+    def test_sync_calendar_persists_events_across_courses(self) -> None:
+        client = make_client(call=RAW_CALENDAR_RESPONSE)
+        sync = MoodleSync(client, self.conn)
+        sync.sync_courses(user_id=15465)
+
+        events = sync.sync_calendar([4409, 22055])
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].id, 807162)
+        self.assertEqual(events[0].description, "x")
+
+    def test_sync_calendar_twice_is_idempotent(self) -> None:
+        client = make_client(call=RAW_CALENDAR_RESPONSE)
+        sync = MoodleSync(client, self.conn)
+        sync.sync_courses(user_id=15465)
+
+        sync.sync_calendar([4409])
+        sync.sync_calendar([4409])
+
+        rows = self.conn.execute("SELECT * FROM calendar_events").fetchall()
+        self.assertEqual(len(rows), 1)
+
+    def test_sync_calendar_with_no_courses_does_nothing(self) -> None:
+        client = make_client()
+        sync = MoodleSync(client, self.conn)
+
+        result = sync.sync_calendar([])
+
+        self.assertEqual(result, [])
+        client.call.assert_not_called()
 
 
 if __name__ == "__main__":
