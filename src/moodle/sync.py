@@ -4,7 +4,17 @@ import sqlite3
 
 from database import moodle_repository as repo
 from moodle.client import MoodleClient
-from moodle.models import Course, CourseFile, CourseModule, CourseSection, MoodleUser
+from moodle.models import (
+    Assignment,
+    AssignmentSubmissionStatus,
+    CalendarEvent,
+    Course,
+    CourseFile,
+    CourseModule,
+    CourseSection,
+    Grade,
+    MoodleUser,
+)
 
 
 class MoodleSync:
@@ -57,3 +67,74 @@ class MoodleSync:
         repo.upsert_modules(self._conn, modules)
         repo.upsert_files(self._conn, files)
         return sections
+
+    def sync_assignments(self, course_ids: list[int] | None = None) -> list[Assignment]:
+        """mod_assign_get_assignments -> assignments, for the user's own courses.
+
+        Only the assignment definitions are fetched here (one bulk call for
+        all courses). Per-user submission state is a separate, explicit call
+        via sync_assignment_submission_status - not done automatically for
+        every assignment, to avoid one Moodle request per assignment.
+        """
+        if course_ids is None:
+            course_ids = [row["id"] for row in repo.get_courses(self._conn)]
+        if not course_ids:
+            return []
+
+        raw = self._client.call("mod_assign_get_assignments", {"courseids": course_ids})
+        assignments = [
+            Assignment.from_moodle(raw_course["id"], raw_assignment)
+            for raw_course in raw.get("courses", [])
+            for raw_assignment in raw_course.get("assignments", []) or []
+        ]
+        repo.upsert_assignments(self._conn, assignments)
+        return assignments
+
+    def sync_assignment_submission_status(self, assignment_id: int) -> AssignmentSubmissionStatus:
+        """mod_assign_get_submission_status -> assignment_submission_status, for one assignment.
+
+        Only ever reads the authenticated user's own status (Moodle scopes
+        this call to the caller by default); never another user's.
+        """
+        raw = self._client.call("mod_assign_get_submission_status", {"assignid": assignment_id})
+        status = AssignmentSubmissionStatus.from_moodle(assignment_id, raw)
+        repo.upsert_assignment_submission_status(self._conn, status)
+        return status
+
+    def sync_grades(self, course_id: int, user_id: int | None = None) -> list[Grade]:
+        """gradereport_user_get_grade_items -> grades, for one course.
+
+        Deliberately not gradereport_user_get_grades_table, which returns
+        rendered HTML rather than structured data.
+        """
+        if user_id is None:
+            user_id = self._client.get_site_info()["userid"]
+
+        raw = self._client.call(
+            "gradereport_user_get_grade_items", {"courseid": course_id, "userid": user_id}
+        )
+        grades = [
+            Grade.from_moodle(course_id, user_id, raw_item)
+            for raw_usergrade in raw.get("usergrades", [])
+            for raw_item in raw_usergrade.get("gradeitems", []) or []
+        ]
+        repo.upsert_grades(self._conn, grades)
+        return grades
+
+    def sync_calendar(self, course_ids: list[int] | None = None) -> list[CalendarEvent]:
+        """core_calendar_get_action_events_by_courses -> calendar_events, in bulk."""
+        if course_ids is None:
+            course_ids = [row["id"] for row in repo.get_courses(self._conn)]
+        if not course_ids:
+            return []
+
+        raw = self._client.call(
+            "core_calendar_get_action_events_by_courses", {"courseids": course_ids}
+        )
+        events = [
+            CalendarEvent.from_moodle(raw_event)
+            for group in raw.get("groupedbycourse", [])
+            for raw_event in group.get("events", []) or []
+        ]
+        repo.upsert_calendar_events(self._conn, events)
+        return events

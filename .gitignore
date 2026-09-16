@@ -26,6 +26,9 @@ env/
 *.sqlite
 *.sqlite3
 
+# Local data (ingested original files, Storage backend root)
+data/
+
 # Logs
 *.log
 logs/
