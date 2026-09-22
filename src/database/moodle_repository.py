@@ -130,6 +130,30 @@ def get_courses(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     return conn.execute("SELECT * FROM courses ORDER BY fullname").fetchall()
 
 
+def get_course(conn: sqlite3.Connection, course_id: int) -> sqlite3.Row | None:
+    return conn.execute("SELECT * FROM courses WHERE id = ?", (course_id,)).fetchone()
+
+
+def set_course_timeline_classification(
+    conn: sqlite3.Connection, course_id: int, classification: str
+) -> None:
+    """Records Moodle's own dashboard/timeline classification for a course
+    ('inprogress' | 'past' | 'future') - see MoodleSync.sync_course_classification().
+
+    A plain UPDATE, not an upsert: this only ever refines a course row that
+    sync_courses() already created. If course_id isn't in the table yet,
+    this is a silent no-op (0 rows affected) rather than an error - the
+    caller (sync_course_classification) already scopes course_ids to
+    courses Moodle itself just returned, so this should not normally happen,
+    but a partial/out-of-order sync must not crash.
+    """
+    conn.execute(
+        "UPDATE courses SET timeline_classification = ?, last_synced_at = ? WHERE id = ?",
+        (classification, _now(), course_id),
+    )
+    conn.commit()
+
+
 def get_course_modules(conn: sqlite3.Connection, course_id: int) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT * FROM course_modules WHERE course_id = ? ORDER BY id", (course_id,)
@@ -162,6 +186,38 @@ def get_assignments(conn: sqlite3.Connection, course_id: int) -> list[sqlite3.Ro
     return conn.execute(
         "SELECT * FROM assignments WHERE course_id = ? ORDER BY duedate", (course_id,)
     ).fetchall()
+
+
+_ASSIGNMENTS_WITH_STATUS_SQL = """
+    SELECT
+        a.id, a.course_id, a.name, a.duedate, a.allowsubmissionsfromdate, a.cutoffdate, a.grade,
+        s.submission_status, s.grading_status
+    FROM assignments a
+    LEFT JOIN assignment_submission_status s ON s.assignment_id = a.id
+"""
+
+
+def get_assignments_with_status(
+    conn: sqlite3.Connection, course_id: int | None = None
+) -> list[sqlite3.Row]:
+    """Every assignment with its submission status when known (LEFT JOIN -
+    an assignment whose status was never synced still appears, with
+    submission_status/grading_status as NULL rather than being dropped).
+
+    Read Model's is_assignment_pending() is what actually decides what NULL
+    means for "pending" purposes - this function just exposes the real data.
+    """
+    if course_id is None:
+        return conn.execute(_ASSIGNMENTS_WITH_STATUS_SQL + " ORDER BY a.duedate").fetchall()
+    return conn.execute(
+        _ASSIGNMENTS_WITH_STATUS_SQL + " WHERE a.course_id = ? ORDER BY a.duedate", (course_id,)
+    ).fetchall()
+
+
+def get_assignment_with_status(conn: sqlite3.Connection, assignment_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        _ASSIGNMENTS_WITH_STATUS_SQL + " WHERE a.id = ?", (assignment_id,)
+    ).fetchone()
 
 
 def upsert_assignment_submission_status(
@@ -227,6 +283,12 @@ def get_grades(conn: sqlite3.Connection, course_id: int) -> list[sqlite3.Row]:
     ).fetchall()
 
 
+def get_all_grades(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every synced grade for every course - for "grades available to the
+    user" with no course filter (Read Model's get_grades(course_id=None))."""
+    return conn.execute("SELECT * FROM grades ORDER BY course_id, item_name").fetchall()
+
+
 def upsert_calendar_events(conn: sqlite3.Connection, events: Iterable[CalendarEvent]) -> None:
     now = _now()
     conn.executemany(
@@ -261,4 +323,24 @@ def get_calendar_events(
         return conn.execute("SELECT * FROM calendar_events ORDER BY timestart").fetchall()
     return conn.execute(
         "SELECT * FROM calendar_events WHERE course_id = ? ORDER BY timestart", (course_id,)
+    ).fetchall()
+
+
+def get_calendar_events_in_range(
+    conn: sqlite3.Connection, start: int, end: int, course_id: int | None = None
+) -> list[sqlite3.Row]:
+    """Events with timestart in [start, end] (both inclusive), already-synced
+    only - never queries Moodle. course_id=None spans every course."""
+    if course_id is None:
+        return conn.execute(
+            "SELECT * FROM calendar_events WHERE timestart >= ? AND timestart <= ? ORDER BY timestart",
+            (start, end),
+        ).fetchall()
+    return conn.execute(
+        """
+        SELECT * FROM calendar_events
+        WHERE course_id = ? AND timestart >= ? AND timestart <= ?
+        ORDER BY timestart
+        """,
+        (course_id, start, end),
     ).fetchall()

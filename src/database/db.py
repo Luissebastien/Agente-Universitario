@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS courses (
     progress REAL,
     startdate INTEGER,
     enddate INTEGER,
+    timeline_classification TEXT,
     created_at TEXT NOT NULL,
     last_synced_at TEXT NOT NULL
 );
@@ -152,6 +153,19 @@ CREATE TABLE IF NOT EXISTS extracted_documents (
     metadata TEXT,
     extracted_at TEXT NOT NULL
 );
+
+-- Read Model query support. Each index below backs a specific query the
+-- Read Model actually runs (see src/read_model/) - not a blanket "index
+-- everything". Columns already covered by a PRIMARY KEY or UNIQUE
+-- constraint (e.g. resource_versions(resource_id, version_number)) are not
+-- re-indexed here.
+CREATE INDEX IF NOT EXISTS idx_assignments_course_id ON assignments(course_id);
+CREATE INDEX IF NOT EXISTS idx_grades_course_id ON grades(course_id);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_course_id ON calendar_events(course_id);
+CREATE INDEX IF NOT EXISTS idx_calendar_events_timestart ON calendar_events(timestart);
+CREATE INDEX IF NOT EXISTS idx_resources_course_id ON resources(course_id);
+CREATE INDEX IF NOT EXISTS idx_extracted_documents_resource_version_id
+    ON extracted_documents(resource_version_id);
 """
 
 

@@ -6,8 +6,9 @@ from pathlib import Path
 
 from database import extraction_repository as extraction_repo
 from database import ingestion_repository as ingestion_repo
-from extraction.extractors import DEFAULT_EXTRACTORS, Extractor
+from extraction.extractors import Extractor, build_default_extractors
 from extraction.models import ExtractedDocument
+from extraction.ocr import OcrEngine
 from ingestion.storage import Storage, StorageError
 
 _VALID_DEPTHS = {"basic", "deep"}
@@ -39,17 +40,27 @@ class Extraction:
 
     Every extract() call inserts a new ExtractedDocument row (append-only
     audit trail per DEC-038), even when re-run against the same version/depth.
+
+    depth ("basic"/"deep") is recorded but does not currently change which
+    extractor runs or how - both depths use identical extraction for every
+    format in this phase. Real depth differentiation (e.g. deeper OCR,
+    structural parsing) is deliberately deferred; see .ai/decisions.md.
+
+    ocr_engine is optional and defaults to None (no OCR available - PDFs use
+    native extraction only, images become unsupported). Extraction never
+    imports a specific OCR library itself; see extraction/ocr.py.
     """
 
     def __init__(
         self,
         storage: Storage,
         conn: sqlite3.Connection,
+        ocr_engine: OcrEngine | None = None,
         extractors: list[Extractor] | None = None,
     ) -> None:
         self._storage = storage
         self._conn = conn
-        self._extractors = extractors if extractors is not None else DEFAULT_EXTRACTORS
+        self._extractors = extractors if extractors is not None else build_default_extractors(ocr_engine)
 
     def extract(self, resource_version_id: int, depth: str = "basic") -> ExtractedDocument:
         if depth not in _VALID_DEPTHS:

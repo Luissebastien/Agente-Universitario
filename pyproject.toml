@@ -8,6 +8,36 @@ version = "0.1.0"
 description = "Personal academic automation assistant (Agente U)."
 requires-python = ">=3.11"
 readme = "README.md"
+dependencies = [
+    # PDF: native text extraction (existing project decision).
+    "pypdf>=6.0",
+    # PDF: renders a page to an image for the OCR fallback path only.
+    # Chosen over PyMuPDF specifically to avoid PyMuPDF's AGPL-3.0/commercial
+    # dual license (flagged as a real risk in the OCR benchmark) - pypdfium2
+    # wraps Google's PDFium and is BSD-3-Clause/Apache-2.0, with no external
+    # binary to install.
+    "pypdfium2>=5.0",
+    # DOCX text/table/image-count extraction.
+    "python-docx>=1.2",
+    # PPTX text extraction. Does NOT support .ppsx (confirmed in the OCR
+    # benchmark against real files) - .ppsx is handled by a small manual
+    # OOXML (zip+XML) reader in extractors.py instead.
+    "python-pptx>=1.0",
+    # XLSX structured (row/cell) extraction.
+    "openpyxl>=3.1",
+    # Legacy binary .xls extraction - benchmarked at ~88% success on real files.
+    "xlrd>=2.0",
+    # ODT/ODS (OpenDocument) extraction.
+    "odfpy>=1.4",
+    # OCR engine for the MVP (provisional choice, see .ai/decisions.md) with
+    # its CPU/PyTorch backend. Used behind the OcrEngine abstraction in
+    # src/extraction/ocr.py so it can be swapped after the post-MVP benchmark.
+    "python-doctr[torch]>=1.1",
+    # Deskew preprocessing (src/extraction/ocr.py) - used directly, declared
+    # explicitly rather than relying on it arriving transitively via doctr/torch.
+    "numpy>=2.0",
+    "Pillow>=12.0",
+]
 
 [tool.setuptools]
 package-dir = { "" = "src" }

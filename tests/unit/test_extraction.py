@@ -1,3 +1,4 @@
+import io
 import tempfile
 import unittest
 from pathlib import Path
@@ -7,8 +8,17 @@ from database import extraction_repository as extraction_repo
 from database import ingestion_repository as ingestion_repo
 from database.db import connect
 from extraction.extract import Extraction, ExtractionError
+from extraction.ocr import OcrEngine, OcrResult
 from ingestion.models import ResourceDescriptor, ResourceVersion
 from ingestion.storage import FilesystemStorage, StorageError, StorageNotFoundError
+
+
+class _FakeOcrEngine(OcrEngine):
+    name = "fake"
+    version = "1"
+
+    def ocr(self, image_bytes: bytes) -> OcrResult:
+        return OcrResult(text="ocr text", metadata={})
 
 
 def _descriptor(name: str, mimetype: str | None) -> ResourceDescriptor:
@@ -93,8 +103,13 @@ class SupportedFormatTests(ExtractionTestCase):
 
 
 class UnsupportedFormatTests(ExtractionTestCase):
+    """.doc (legacy binary Word) is deliberately out of MVP scope - the OCR
+    benchmark found no viable local extraction strategy for it - so it's a
+    realistic, still-unsupported fixture (unlike .pptx/.docx/etc, which this
+    phase now supports)."""
+
     def test_unsupported_mimetype_fails_explicitly_without_raising(self) -> None:
-        version = self._ingest("slides.pptx", "application/vnd.ms-powerpoint", b"\x00\x01binary")
+        version = self._ingest("notes.doc", "application/msword", b"\x00\x01binary")
 
         doc = self.extraction.extract(version.id)
 
@@ -103,7 +118,7 @@ class UnsupportedFormatTests(ExtractionTestCase):
         self.assertIn("unsupported format", doc.error_reason)
 
     def test_unsupported_format_does_not_delete_the_original(self) -> None:
-        version = self._ingest("slides.pptx", "application/vnd.ms-powerpoint", b"\x00\x01binary")
+        version = self._ingest("notes.doc", "application/msword", b"\x00\x01binary")
         self.extraction.extract(version.id)
 
         self.assertTrue(self.storage.exists(version.storage_ref))
@@ -173,6 +188,107 @@ class DepthTests(ExtractionTestCase):
 
         self.assertEqual(basic.depth, "basic")
         self.assertEqual(deep.depth, "deep")
+
+
+class NewFormatsThroughExtractionTests(ExtractionTestCase):
+    """End-to-end through Extraction.extract() (not just the extractor
+    classes in isolation) for every MVP format, confirming the wiring in
+    build_default_extractors() actually works - not just each extractor on
+    its own."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.extraction_with_ocr = Extraction(self.storage, self.conn, ocr_engine=_FakeOcrEngine())
+
+    def _docx_bytes(self) -> bytes:
+        import docx
+
+        doc = docx.Document()
+        doc.add_paragraph("Contenido real del documento.")
+        buf = io.BytesIO()
+        doc.save(buf)
+        return buf.getvalue()
+
+    def _xlsx_bytes(self) -> bytes:
+        import openpyxl
+
+        wb = openpyxl.Workbook()
+        wb.active.append(["Curso", "Nota"])
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def _png_bytes(self) -> bytes:
+        from PIL import Image
+
+        im = Image.new("RGB", (40, 20), "white")
+        buf = io.BytesIO()
+        im.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def test_docx_through_full_pipeline(self) -> None:
+        version = self._ingest(
+            "notas.docx",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            self._docx_bytes(),
+        )
+        doc = self.extraction_with_ocr.extract(version.id)
+        self.assertEqual(doc.status, "done")
+        self.assertIn("Contenido real", doc.extracted_text)
+        self.assertEqual(doc.extractor_name, "docx")
+
+    def test_xlsx_through_full_pipeline(self) -> None:
+        version = self._ingest(
+            "notas.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            self._xlsx_bytes(),
+        )
+        doc = self.extraction_with_ocr.extract(version.id)
+        self.assertEqual(doc.status, "done")
+        self.assertIn("Curso | Nota", doc.extracted_text)
+        self.assertEqual(doc.extractor_name, "xlsx")
+
+    def test_image_through_full_pipeline_uses_ocr(self) -> None:
+        version = self._ingest("captura.png", "image/png", self._png_bytes())
+        doc = self.extraction_with_ocr.extract(version.id)
+        self.assertEqual(doc.status, "done")
+        self.assertEqual(doc.extracted_text, "ocr text")
+        self.assertEqual(doc.extractor_name, "image_ocr")
+
+    def test_image_without_ocr_engine_is_unsupported_not_a_crash(self) -> None:
+        extraction_no_ocr = Extraction(self.storage, self.conn, ocr_engine=None)
+        version = self._ingest("captura.png", "image/png", self._png_bytes())
+        doc = extraction_no_ocr.extract(version.id)
+        self.assertEqual(doc.status, "failed")
+        self.assertIn("unsupported format", doc.error_reason)
+
+    def test_doc_legacy_remains_unsupported(self) -> None:
+        # DOC is explicitly out of MVP scope - must still degrade safely.
+        version = self._ingest("viejo.doc", "application/msword", b"\x00\x01legacy")
+        doc = self.extraction_with_ocr.extract(version.id)
+        self.assertEqual(doc.status, "failed")
+        self.assertIn("unsupported format", doc.error_reason)
+        self.assertTrue(self.storage.exists(version.storage_ref))  # original preserved
+
+
+class DepthDoesNotChangeExtractorSelectionTests(ExtractionTestCase):
+    def test_basic_and_deep_use_the_same_extractor_for_docx(self) -> None:
+        extraction = Extraction(self.storage, self.conn, ocr_engine=_FakeOcrEngine())
+        import docx
+
+        d = docx.Document()
+        d.add_paragraph("Igual en ambas profundidades.")
+        buf = io.BytesIO()
+        d.save(buf)
+        version = self._ingest(
+            "x.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", buf.getvalue()
+        )
+
+        basic = extraction.extract(version.id, depth="basic")
+        deep = extraction.extract(version.id, depth="deep")
+
+        self.assertEqual(basic.extractor_name, deep.extractor_name)
+        self.assertEqual(basic.extracted_text, deep.extracted_text)
 
 
 if __name__ == "__main__":
