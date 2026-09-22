@@ -193,6 +193,62 @@ class MoodleSyncTests(unittest.TestCase):
         self.assertEqual(len(self.conn.execute("SELECT * FROM course_files").fetchall()), 1)
 
 
+class SyncCourseClassificationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.conn = connect(":memory:")
+
+    def tearDown(self) -> None:
+        self.conn.close()
+
+    def _make_classification_client(self) -> MagicMock:
+        client = make_client()
+
+        def fake_call(function, params):
+            self.assertEqual(function, "core_course_get_enrolled_courses_by_timeline_classification")
+            by_classification = {
+                "inprogress": {"courses": [{"id": 4409}]},
+                "past": {"courses": [{"id": 22055}]},
+                "future": {"courses": []},
+            }
+            return by_classification[params["classification"]]
+
+        client.call.side_effect = fake_call
+        return client
+
+    def test_persists_classification_per_course(self) -> None:
+        client = self._make_classification_client()
+        sync = MoodleSync(client, self.conn)
+        sync.sync_courses(user_id=15465)  # courses must exist first
+
+        result = sync.sync_course_classification()
+
+        self.assertEqual(result, {4409: "inprogress", 22055: "past"})
+        row_4409 = self.conn.execute("SELECT timeline_classification FROM courses WHERE id = 4409").fetchone()
+        row_22055 = self.conn.execute("SELECT timeline_classification FROM courses WHERE id = 22055").fetchone()
+        self.assertEqual(row_4409["timeline_classification"], "inprogress")
+        self.assertEqual(row_22055["timeline_classification"], "past")
+
+    def test_calls_all_three_classifications(self) -> None:
+        client = self._make_classification_client()
+        sync = MoodleSync(client, self.conn)
+        sync.sync_courses(user_id=15465)
+
+        sync.sync_course_classification()
+
+        called_classifications = {c.args[1]["classification"] for c in client.call.call_args_list}
+        self.assertEqual(called_classifications, {"inprogress", "past", "future"})
+
+    def test_course_not_yet_synced_does_not_raise(self) -> None:
+        # classification arrives for a course_id we haven't synced via
+        # sync_courses() yet - must be a safe no-op, not a crash.
+        client = self._make_classification_client()
+        sync = MoodleSync(client, self.conn)  # sync_courses() deliberately not called
+
+        result = sync.sync_course_classification()  # should not raise
+
+        self.assertEqual(result, {4409: "inprogress", 22055: "past"})
+
+
 class SyncAssignmentsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.conn = connect(":memory:")

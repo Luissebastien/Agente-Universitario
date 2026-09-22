@@ -74,6 +74,50 @@ class UpsertCoursesTests(RepositoryTestCase):
         row = self.conn.execute("SELECT progress FROM courses WHERE id = 1").fetchone()
         self.assertEqual(row["progress"], 50.0)
 
+    def test_get_course_returns_the_matching_row(self) -> None:
+        repo.upsert_courses(self.conn, [
+            Course(id=1, shortname="a", fullname="A", category=None, visible=True,
+                   progress=None, startdate=None, enddate=None),
+        ])
+        row = repo.get_course(self.conn, 1)
+        self.assertEqual(row["shortname"], "a")
+
+    def test_get_course_returns_none_when_missing(self) -> None:
+        self.assertIsNone(repo.get_course(self.conn, 999))
+
+    def test_new_courses_have_no_classification_until_synced(self) -> None:
+        repo.upsert_courses(self.conn, [
+            Course(id=1, shortname="a", fullname="A", category=None, visible=True,
+                   progress=None, startdate=None, enddate=None),
+        ])
+        row = repo.get_course(self.conn, 1)
+        self.assertIsNone(row["timeline_classification"])
+
+
+class SetCourseTimelineClassificationTests(RepositoryTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        repo.upsert_courses(self.conn, [
+            Course(id=1, shortname="a", fullname="A", category=None, visible=True,
+                   progress=None, startdate=None, enddate=None),
+        ])
+
+    def test_sets_the_classification(self) -> None:
+        repo.set_course_timeline_classification(self.conn, 1, "inprogress")
+        row = repo.get_course(self.conn, 1)
+        self.assertEqual(row["timeline_classification"], "inprogress")
+
+    def test_updating_again_overwrites_not_duplicates(self) -> None:
+        repo.set_course_timeline_classification(self.conn, 1, "inprogress")
+        repo.set_course_timeline_classification(self.conn, 1, "past")
+        row = repo.get_course(self.conn, 1)
+        self.assertEqual(row["timeline_classification"], "past")
+        self.assertEqual(len(repo.get_courses(self.conn)), 1)
+
+    def test_unknown_course_id_is_a_safe_no_op(self) -> None:
+        repo.set_course_timeline_classification(self.conn, 999999, "inprogress")  # must not raise
+        self.assertEqual(len(repo.get_courses(self.conn)), 1)  # unaffected
+
 
 class UpsertSectionsModulesFilesTests(RepositoryTestCase):
     def setUp(self) -> None:
@@ -219,6 +263,58 @@ class UpsertAssignmentSubmissionStatusTests(RepositoryTestCase):
         self.assertIsNone(repo.get_assignment_submission_status(self.conn, assignment_id=999))
 
 
+class GetAssignmentsWithStatusTests(RepositoryTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        repo.upsert_courses(
+            self.conn,
+            [Course(id=4409, shortname="a", fullname="A", category=None, visible=True,
+                    progress=None, startdate=None, enddate=None)],
+        )
+        repo.upsert_assignments(
+            self.conn,
+            [
+                Assignment(id=1, course_id=4409, name="with status", duedate=100,
+                           allowsubmissionsfromdate=None, cutoffdate=None, grade=None),
+                Assignment(id=2, course_id=4409, name="never synced", duedate=200,
+                           allowsubmissionsfromdate=None, cutoffdate=None, grade=None),
+            ],
+        )
+        repo.upsert_assignment_submission_status(
+            self.conn,
+            AssignmentSubmissionStatus(assignment_id=1, submission_status="new",
+                                        grading_status="notgraded", cansubmit=True,
+                                        submitted_at=None),
+        )
+
+    def test_left_join_keeps_assignments_with_no_synced_status(self) -> None:
+        rows = repo.get_assignments_with_status(self.conn)
+        by_id = {r["id"]: r for r in rows}
+        self.assertEqual(by_id[1]["submission_status"], "new")
+        self.assertIsNone(by_id[2]["submission_status"])  # never synced, not dropped
+
+    def test_filters_by_course_id(self) -> None:
+        repo.upsert_courses(
+            self.conn,
+            [Course(id=9999, shortname="b", fullname="B", category=None, visible=True,
+                    progress=None, startdate=None, enddate=None)],
+        )
+        repo.upsert_assignments(
+            self.conn,
+            [Assignment(id=3, course_id=9999, name="other course", duedate=None,
+                        allowsubmissionsfromdate=None, cutoffdate=None, grade=None)],
+        )
+        rows = repo.get_assignments_with_status(self.conn, course_id=4409)
+        self.assertEqual({r["id"] for r in rows}, {1, 2})
+
+    def test_get_single_assignment_with_status(self) -> None:
+        row = repo.get_assignment_with_status(self.conn, 1)
+        self.assertEqual(row["submission_status"], "new")
+
+    def test_get_single_missing_assignment_returns_none(self) -> None:
+        self.assertIsNone(repo.get_assignment_with_status(self.conn, 999))
+
+
 class UpsertGradesTests(RepositoryTestCase):
     def setUp(self) -> None:
         super().setUp()
@@ -255,6 +351,26 @@ class UpsertGradesTests(RepositoryTestCase):
 
         row = self.conn.execute("SELECT grade_raw FROM grades WHERE id = 1").fetchone()
         self.assertEqual(row["grade_raw"], 10.0)
+
+    def test_get_all_grades_spans_every_course(self) -> None:
+        repo.upsert_courses(
+            self.conn,
+            [Course(id=9999, shortname="b", fullname="B", category=None, visible=True,
+                    progress=None, startdate=None, enddate=None)],
+        )
+        repo.upsert_grades(
+            self.conn,
+            [
+                Grade(id=1, course_id=4409, user_id=15465, cmid=None, item_name="x",
+                      item_type="mod", item_module="assign", grade_raw=1.0,
+                      grade_formatted="1", percentage_formatted="10 %"),
+                Grade(id=2, course_id=9999, user_id=15465, cmid=None, item_name="y",
+                      item_type="mod", item_module="assign", grade_raw=2.0,
+                      grade_formatted="2", percentage_formatted="20 %"),
+            ],
+        )
+        rows = repo.get_all_grades(self.conn)
+        self.assertEqual({r["course_id"] for r in rows}, {4409, 9999})
 
 
 class UpsertCalendarEventsTests(RepositoryTestCase):

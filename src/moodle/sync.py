@@ -43,6 +43,31 @@ class MoodleSync:
         repo.upsert_courses(self._conn, courses)
         return courses
 
+    def sync_course_classification(self) -> dict[int, str]:
+        """core_course_get_enrolled_courses_by_timeline_classification ->
+        courses.timeline_classification.
+
+        This is Moodle's own dashboard/mobile-app course classification
+        ('inprogress' | 'past' | 'future'), not a heuristic derived here from
+        startdate/enddate - verified against the real INTEC instance to
+        return exactly the same courses as sync_courses(), correctly split
+        by classification. A course must already exist in `courses` (i.e.
+        sync_courses() has run) for this to have any effect - it only
+        updates the classification column, never inserts a course.
+        """
+        classifications: dict[int, str] = {}
+        for classification in ("inprogress", "past", "future"):
+            raw = self._client.call(
+                "core_course_get_enrolled_courses_by_timeline_classification",
+                {"classification": classification, "limit": 0, "offset": 0, "sort": "fullname"},
+            )
+            for raw_course in raw.get("courses", []) or []:
+                classifications[raw_course["id"]] = classification
+
+        for course_id, classification in classifications.items():
+            repo.set_course_timeline_classification(self._conn, course_id, classification)
+        return classifications
+
     def sync_course_contents(self, course_id: int) -> list[CourseSection]:
         """core_course_get_contents -> course_sections, course_modules, course_files."""
         raw_sections = self._client.get_course_contents(course_id)

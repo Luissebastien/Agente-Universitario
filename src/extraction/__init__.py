@@ -1,12 +1,23 @@
 from extraction.extract import Extraction, ExtractionError
 from extraction.extractors import (
     DEFAULT_EXTRACTORS,
+    DocxExtractor,
     Extractor,
     ExtractionResult,
     HtmlExtractor,
+    ImageExtractor,
+    OdsExtractor,
+    OdtExtractor,
+    PdfExtractor,
     PlainTextExtractor,
+    PptxExtractor,
+    XlsExtractor,
+    XlsxExtractor,
+    build_default_extractors,
+    is_native_text_sufficient,
 )
 from extraction.models import ExtractedDocument
+from extraction.ocr import DoctrOcrEngine, OcrEngine, OcrResult, deskew, estimate_skew_angle
 
 __all__ = [
     "Extraction",
@@ -16,5 +27,20 @@ __all__ = [
     "ExtractionResult",
     "PlainTextExtractor",
     "HtmlExtractor",
+    "PdfExtractor",
+    "ImageExtractor",
+    "DocxExtractor",
+    "PptxExtractor",
+    "XlsxExtractor",
+    "XlsExtractor",
+    "OdtExtractor",
+    "OdsExtractor",
     "DEFAULT_EXTRACTORS",
+    "build_default_extractors",
+    "is_native_text_sufficient",
+    "OcrEngine",
+    "OcrResult",
+    "DoctrOcrEngine",
+    "deskew",
+    "estimate_skew_angle",
 ]
