@@ -177,7 +177,12 @@ class AssignmentSubmissionStatus:
     @classmethod
     def from_moodle(cls, assignment_id: int, data: dict[str, Any]) -> AssignmentSubmissionStatus:
         lastattempt = data.get("lastattempt") or {}
-        submission = lastattempt.get("submission") or {}
+        # Group assignments (teamsubmission enabled) report status under
+        # 'teamsubmission' instead of 'submission' until the group has an
+        # individual record too - confirmed against real la instancia real group
+        # assignments with no attempt yet. Individual assignments never have
+        # a 'teamsubmission' key, so this fallback never changes their result.
+        submission = lastattempt.get("submission") or lastattempt.get("teamsubmission") or {}
         return cls(
             assignment_id=assignment_id,
             submission_status=submission.get("status"),

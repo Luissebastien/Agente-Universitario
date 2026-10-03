@@ -142,6 +142,50 @@ class AssignmentSubmissionStatusModelTests(unittest.TestCase):
         self.assertIsNone(status.grading_status)
         self.assertIsNone(status.submission_status)
 
+    def test_from_moodle_falls_back_to_teamsubmission_when_no_individual_submission(self) -> None:
+        # Real shape observed against la instancia real for a group (teamsubmission)
+        # assignment the group has not yet attempted: 'lastattempt' has a
+        # 'teamsubmission' object but no 'submission' key at all. Before the
+        # fix this silently produced submission_status=None, making a real
+        # overdue, unsubmitted group assignment indistinguishable from "no
+        # data synced yet" (fail-closed excluded it instead of flagging it).
+        status = AssignmentSubmissionStatus.from_moodle(
+            130311,
+            {
+                "lastattempt": {
+                    "gradingstatus": "notgraded",
+                    "cansubmit": False,
+                    "teamsubmission": {
+                        "id": 2387785,
+                        "userid": 0,
+                        "status": "new",
+                        "groupid": 0,
+                        "assignment": 130311,
+                        "timemodified": 1786939233,
+                    },
+                },
+            },
+        )
+        self.assertEqual(status.submission_status, "new")
+        self.assertEqual(status.submitted_at, 1786939233)
+        self.assertEqual(status.grading_status, "notgraded")
+
+    def test_from_moodle_prefers_individual_submission_over_teamsubmission(self) -> None:
+        # When both are present (observed for already-submitted group
+        # assignments), the individual 'submission' remains authoritative.
+        status = AssignmentSubmissionStatus.from_moodle(
+            132544,
+            {
+                "lastattempt": {
+                    "gradingstatus": "notgraded",
+                    "submission": {"status": "submitted", "timemodified": 2000},
+                    "teamsubmission": {"status": "new", "timemodified": 1000},
+                },
+            },
+        )
+        self.assertEqual(status.submission_status, "submitted")
+        self.assertEqual(status.submitted_at, 2000)
+
 
 class GradeModelTests(unittest.TestCase):
     def test_from_moodle(self) -> None:

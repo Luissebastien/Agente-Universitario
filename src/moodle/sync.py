@@ -57,11 +57,8 @@ class MoodleSync:
         """
         classifications: dict[int, str] = {}
         for classification in ("inprogress", "past", "future"):
-            raw = self._client.call(
-                "core_course_get_enrolled_courses_by_timeline_classification",
-                {"classification": classification, "limit": 0, "offset": 0, "sort": "fullname"},
-            )
-            for raw_course in raw.get("courses", []) or []:
+            raw_courses = self._client.get_enrolled_courses_by_timeline_classification(classification)
+            for raw_course in raw_courses or []:
                 classifications[raw_course["id"]] = classification
 
         for course_id, classification in classifications.items():

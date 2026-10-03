@@ -222,6 +222,21 @@ class MoodleClient:
         """core_course_get_contents: sections, modules, and resources of a course."""
         return self.call("core_course_get_contents", {"courseid": course_id})
 
+    def get_enrolled_courses_by_timeline_classification(
+        self, classification: str
+    ) -> list[dict[str, Any]]:
+        """core_course_get_enrolled_courses_by_timeline_classification: the
+        same official classification Moodle's own Dashboard and mobile app
+        use to split the user's enrolled courses ('inprogress' | 'past' |
+        'future') - the source of truth this project uses instead of
+        reconstructing "current course" from startdate/enddate locally.
+        """
+        data = self.call(
+            "core_course_get_enrolled_courses_by_timeline_classification",
+            {"classification": classification, "limit": 0, "offset": 0, "sort": "fullname"},
+        )
+        return data.get("courses", [])
+
     def _assert_trusted_file_url(self, file_url: str, parsed: urllib.parse.SplitResult) -> None:
         """Refuse to send the token anywhere but the configured Moodle host.
 

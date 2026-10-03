@@ -106,6 +106,41 @@ class MoodleSyncSmokeTest(unittest.TestCase):
             finally:
                 conn.close()
 
+    def test_sync_course_classification_against_real_moodle(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            conn = connect(Path(tmp_dir) / "smoke.sqlite3")
+            try:
+                with MoodleClient.from_env() as client:
+                    sync = MoodleSync(client, conn)
+                    user = sync.sync_profile()
+                    courses = sync.sync_courses(user.id)
+                    self.assertGreater(len(courses), 0)
+
+                    classification = sync.sync_course_classification()
+                    self.assertGreater(len(classification), 0)
+
+                    from collections import Counter
+                    counts = Counter(classification.values())
+                    print(f"[smoke] real classification counts: {dict(counts)}")
+                    self.assertTrue(set(counts) <= {"inprogress", "past", "future"})
+
+                    rows = conn.execute(
+                        "SELECT id, timeline_classification FROM courses"
+                    ).fetchall()
+                    persisted = {r["id"]: r["timeline_classification"] for r in rows}
+                    for course_id, expected in classification.items():
+                        self.assertEqual(persisted.get(course_id), expected)
+                    print(f"[smoke] persisted classification matches Moodle's response for "
+                          f"{len(classification)} courses")
+
+                    # Idempotency against real data.
+                    classification_again = sync.sync_course_classification()
+                    self.assertEqual(classification_again, classification)
+                    course_count = conn.execute("SELECT COUNT(*) AS n FROM courses").fetchone()["n"]
+                    self.assertEqual(course_count, len(courses))  # no duplicate courses created
+            finally:
+                conn.close()
+
 
 if __name__ == "__main__":
     unittest.main()

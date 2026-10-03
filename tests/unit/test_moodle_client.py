@@ -210,6 +210,41 @@ class GetCourseContentsTests(unittest.TestCase):
         self.assertIn("wsfunction=core_course_get_contents", body)
 
 
+class GetEnrolledCoursesByTimelineClassificationTests(unittest.TestCase):
+    @patch("moodle.client.http.client.HTTPSConnection")
+    def test_sends_classification_and_returns_courses(self, mock_conn_cls: MagicMock) -> None:
+        mock_conn_cls.return_value = make_fake_connection(200, {"courses": [{"id": 101}], "nextoffset": 0})
+        client = MoodleClient("https://campusvirtual.example.edu", FAKE_TOKEN)
+
+        result = client.get_enrolled_courses_by_timeline_classification("inprogress")
+
+        self.assertEqual(result, [{"id": 101}])
+        body = mock_conn_cls.return_value.request.call_args.kwargs["body"]
+        self.assertIn("classification=inprogress", body)
+        self.assertIn(
+            "wsfunction=core_course_get_enrolled_courses_by_timeline_classification", body
+        )
+
+    @patch("moodle.client.http.client.HTTPSConnection")
+    def test_empty_response_returns_empty_list(self, mock_conn_cls: MagicMock) -> None:
+        mock_conn_cls.return_value = make_fake_connection(200, {"courses": [], "nextoffset": 0})
+        client = MoodleClient("https://campusvirtual.example.edu", FAKE_TOKEN)
+
+        result = client.get_enrolled_courses_by_timeline_classification("future")
+
+        self.assertEqual(result, [])
+
+    @patch("moodle.client.http.client.HTTPSConnection")
+    def test_moodle_api_error_raises_consistently(self, mock_conn_cls: MagicMock) -> None:
+        mock_conn_cls.return_value = make_fake_connection(
+            200, {"exception": "moodle_exception", "errorcode": "someerror", "message": "boom"}
+        )
+        client = MoodleClient("https://campusvirtual.example.edu", FAKE_TOKEN)
+
+        with self.assertRaises(MoodleAPIError):
+            client.get_enrolled_courses_by_timeline_classification("past")
+
+
 class DownloadFileTests(unittest.TestCase):
     @patch("moodle.client.urllib.request.urlopen")
     def test_appends_token_to_plain_url(self, mock_urlopen: MagicMock) -> None:

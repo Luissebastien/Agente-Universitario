@@ -108,6 +108,9 @@ class AcademicReadModelSmokeTest(unittest.TestCase):
                                 print(f"[smoke] extracted_document: status={doc.status}, "
                                       f"extractor={doc.extractor_name}, "
                                       f"chars={len(doc.extracted_text or '')}")
+                        by_id = read_model.get_material(m.resource_id)
+                        self.assertEqual(by_id, m)
+                        print(f"[smoke] get_material({m.resource_id}) matches get_course_materials() entry")
                         break
                 if not materials_found:
                     print("[smoke] no ingested materials found for any current course (expected "

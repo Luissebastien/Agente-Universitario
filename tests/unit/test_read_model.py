@@ -336,6 +336,40 @@ class MaterialsTests(ReadModelTestCase):
     def test_get_nonexistent_resource_returns_none(self) -> None:
         self.assertIsNone(self.read_model.get_resource(999999))
 
+    def test_get_material_by_id_matches_course_materials_entry(self) -> None:
+        resource_id = self._make_resource("single-lookup")
+        material = self.read_model.get_material(resource_id)
+        self.assertEqual(material.resource_id, resource_id)
+        self.assertEqual(material, self.read_model.get_course_materials(1)[0])
+
+    def test_get_material_reflects_latest_version_and_extraction(self) -> None:
+        resource_id = self._make_resource("single-lookup-full")
+        v1 = ingestion_repo.insert_resource_version(
+            self.conn,
+            ResourceVersion(id=None, resource_id=resource_id, version_number=1,
+                             content_hash="a", storage_ref="a", size_bytes=1,
+                             mimetype="application/pdf", ingested_at="2026-01-01T00:00:00+00:00"),
+        )
+        v2 = ingestion_repo.insert_resource_version(
+            self.conn,
+            ResourceVersion(id=None, resource_id=resource_id, version_number=2,
+                             content_hash="b", storage_ref="b", size_bytes=2,
+                             mimetype="application/pdf", ingested_at="2026-01-02T00:00:00+00:00"),
+        )
+        extraction_repo.insert_extracted_document(
+            self.conn,
+            ExtractedDocument(id=None, resource_version_id=v2.id, depth="basic",
+                               extractor_name="pdf_hybrid", extractor_version="1", status="done",
+                               error_reason=None, extracted_text="x", metadata={},
+                               extracted_at="2026-01-02T00:00:00+00:00"),
+        )
+        material = self.read_model.get_material(resource_id)
+        self.assertEqual(material.latest_version_number, 2)  # not v1, no duplicate row
+        self.assertEqual(material.extraction_status, "done")
+
+    def test_get_nonexistent_material_returns_none(self) -> None:
+        self.assertIsNone(self.read_model.get_material(999999))
+
 
 class ExtractedDocumentTests(ReadModelTestCase):
     def setUp(self) -> None:
@@ -449,6 +483,7 @@ class ReadOnlyTests(ReadModelTestCase):
         self.read_model.get_course_calendar_events(1, 0, NOW + 1000)
         self.read_model.get_grades()
         self.read_model.get_course_materials(1)
+        self.read_model.get_material(999999)
         self.read_model.get_resource(999999)
         self.read_model.get_extracted_document(999999)
 

@@ -84,7 +84,7 @@ def _row_to_grade(row: sqlite3.Row) -> Grade:
     )
 
 
-_MATERIALS_SQL = """
+_MATERIALS_BASE_SQL = """
     SELECT
         r.id AS resource_id, r.name, r.course_id, r.section_id, r.module_id,
         r.source_type, r.source_url,
@@ -102,9 +102,12 @@ _MATERIALS_SQL = """
         AND ed.id = (
             SELECT MAX(e2.id) FROM extracted_documents e2 WHERE e2.resource_version_id = rv.id
         )
-    WHERE r.course_id = ?
-    ORDER BY r.name
 """
+# "Latest version" / "latest extraction attempt" is defined once above and
+# shared by both queries below, so get_course_materials() and get_material()
+# can never disagree on what "latest" means for the same resource.
+_MATERIALS_BY_COURSE_SQL = _MATERIALS_BASE_SQL + " WHERE r.course_id = ? ORDER BY r.name"
+_MATERIAL_BY_ID_SQL = _MATERIALS_BASE_SQL + " WHERE r.id = ?"
 
 
 def _row_to_material_summary(row: sqlite3.Row) -> MaterialSummary:
@@ -221,8 +224,16 @@ class AcademicReadModel:
         Metadata only - never loads extracted_text (see get_extracted_document()
         for that, fetched only when actually needed).
         """
-        rows = self._conn.execute(_MATERIALS_SQL, (course_id,)).fetchall()
+        rows = self._conn.execute(_MATERIALS_BY_COURSE_SQL, (course_id,)).fetchall()
         return [_row_to_material_summary(r) for r in rows]
+
+    def get_material(self, resource_id: int) -> MaterialSummary | None:
+        """The same view as get_course_materials(), for a single resource by
+        id - the by-ID counterpart to get_course()/get_assignment(), which
+        get_resource() (below) does not provide (it returns the bare
+        Ingestion Resource, without version/extraction status)."""
+        row = self._conn.execute(_MATERIAL_BY_ID_SQL, (resource_id,)).fetchone()
+        return _row_to_material_summary(row) if row else None
 
     def get_resource(self, resource_id: int) -> Resource | None:
         return ingestion_repo.get_resource(self._conn, resource_id)

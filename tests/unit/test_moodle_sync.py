@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 from database.db import connect
 from database import moodle_repository as repo
 from moodle.client import MoodleClient
+from moodle.exceptions import MoodleAPIError
 from moodle.models import MoodleUser
 from moodle.sync import MoodleSync
 
@@ -200,19 +201,19 @@ class SyncCourseClassificationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.conn.close()
 
-    def _make_classification_client(self) -> MagicMock:
+    def _make_classification_client(self, by_classification: dict[str, list[dict]] | None = None) -> MagicMock:
         client = make_client()
+        by_classification = by_classification or {
+            "inprogress": [{"id": 101}],
+            "past": [{"id": 102}],
+            "future": [],
+        }
 
-        def fake_call(function, params):
-            self.assertEqual(function, "core_course_get_enrolled_courses_by_timeline_classification")
-            by_classification = {
-                "inprogress": {"courses": [{"id": 101}]},
-                "past": {"courses": [{"id": 102}]},
-                "future": {"courses": []},
-            }
-            return by_classification[params["classification"]]
+        def fake_get(classification):
+            self.assertIn(classification, ("inprogress", "past", "future"))
+            return by_classification[classification]
 
-        client.call.side_effect = fake_call
+        client.get_enrolled_courses_by_timeline_classification.side_effect = fake_get
         return client
 
     def test_persists_classification_per_course(self) -> None:
@@ -228,15 +229,29 @@ class SyncCourseClassificationTests(unittest.TestCase):
         self.assertEqual(row_4409["timeline_classification"], "inprogress")
         self.assertEqual(row_22055["timeline_classification"], "past")
 
-    def test_calls_all_three_classifications(self) -> None:
+    def test_future_classification_is_persisted(self) -> None:
+        client = self._make_classification_client({
+            "inprogress": [], "past": [], "future": [{"id": 101}],
+        })
+        sync = MoodleSync(client, self.conn)
+        sync.sync_courses(user_id=9001)
+
+        result = sync.sync_course_classification()
+
+        self.assertEqual(result, {101: "future"})
+        row = self.conn.execute("SELECT timeline_classification FROM courses WHERE id = 101").fetchone()
+        self.assertEqual(row["timeline_classification"], "future")
+
+    def test_calls_all_three_classifications_exactly_once_each(self) -> None:
         client = self._make_classification_client()
         sync = MoodleSync(client, self.conn)
         sync.sync_courses(user_id=9001)
 
         sync.sync_course_classification()
 
-        called_classifications = {c.args[1]["classification"] for c in client.call.call_args_list}
-        self.assertEqual(called_classifications, {"inprogress", "past", "future"})
+        calls = client.get_enrolled_courses_by_timeline_classification.call_args_list
+        self.assertEqual(len(calls), 3)  # no unnecessary/duplicate Moodle calls
+        self.assertEqual({c.args[0] for c in calls}, {"inprogress", "past", "future"})
 
     def test_course_not_yet_synced_does_not_raise(self) -> None:
         # classification arrives for a course_id we haven't synced via
@@ -247,6 +262,64 @@ class SyncCourseClassificationTests(unittest.TestCase):
         result = sync.sync_course_classification()  # should not raise
 
         self.assertEqual(result, {101: "inprogress", 102: "past"})
+
+    def test_empty_response_for_every_classification(self) -> None:
+        client = self._make_classification_client({"inprogress": [], "past": [], "future": []})
+        sync = MoodleSync(client, self.conn)
+        sync.sync_courses(user_id=9001)
+
+        result = sync.sync_course_classification()
+
+        self.assertEqual(result, {})
+        row = self.conn.execute("SELECT timeline_classification FROM courses WHERE id = 101").fetchone()
+        self.assertIsNone(row["timeline_classification"])  # untouched, not guessed
+
+    def test_running_twice_does_not_duplicate_courses(self) -> None:
+        client = self._make_classification_client()
+        sync = MoodleSync(client, self.conn)
+        sync.sync_courses(user_id=9001)
+
+        sync.sync_course_classification()
+        sync.sync_course_classification()
+
+        rows = self.conn.execute("SELECT * FROM courses").fetchall()
+        self.assertEqual(len(rows), 2)  # still just the 2 original courses
+
+    def test_course_classification_can_change_between_syncs(self) -> None:
+        # e.g. a course moves from "future" to "inprogress" over time.
+        client = self._make_classification_client({
+            "inprogress": [], "past": [], "future": [{"id": 101}],
+        })
+        sync = MoodleSync(client, self.conn)
+        sync.sync_courses(user_id=9001)
+        sync.sync_course_classification()
+        self.assertEqual(
+            self.conn.execute("SELECT timeline_classification FROM courses WHERE id = 101").fetchone()[
+                "timeline_classification"
+            ],
+            "future",
+        )
+
+        client.get_enrolled_courses_by_timeline_classification.side_effect = lambda c: (
+            [{"id": 101}] if c == "inprogress" else []
+        )
+        sync.sync_course_classification()
+
+        row = self.conn.execute("SELECT timeline_classification FROM courses WHERE id = 101").fetchone()
+        self.assertEqual(row["timeline_classification"], "inprogress")
+
+    def test_moodle_error_propagates(self) -> None:
+        # Consistent with every other sync method: a Moodle-raised error is
+        # never caught/swallowed here, it propagates to the caller.
+        client = make_client()
+        client.get_enrolled_courses_by_timeline_classification.side_effect = MoodleAPIError(
+            "someerror", "boom"
+        )
+        sync = MoodleSync(client, self.conn)
+        sync.sync_courses(user_id=9001)
+
+        with self.assertRaises(MoodleAPIError):
+            sync.sync_course_classification()
 
 
 class SyncAssignmentsTests(unittest.TestCase):
