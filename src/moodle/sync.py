@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import sqlite3
+import time
+from dataclasses import dataclass
 
 from database import moodle_repository as repo
 from moodle.client import MoodleClient
+from moodle.exceptions import MoodleAPIError, MoodleAuthenticationError
 from moodle.models import (
     Assignment,
     AssignmentSubmissionStatus,
@@ -15,6 +18,41 @@ from moodle.models import (
     Grade,
     MoodleUser,
 )
+
+
+@dataclass(frozen=True)
+class SyncReport:
+    """What one MoodleSync.sync_changes() run did. Counts only - no academic content."""
+
+    full: bool
+    courses: int
+    changed_courses: tuple[int, ...]
+    detection_warnings: int
+    assignments: int
+    statuses_refreshed: int
+    grade_items: int
+    calendar_events: int
+    item_warnings: tuple[str, ...] = ()
+
+    @property
+    def items_processed(self) -> int:
+        return (
+            self.courses + self.assignments + self.statuses_refreshed
+            + self.grade_items + self.calendar_events
+        )
+
+    def summary(self) -> str:
+        mode = "full" if self.full else "incremental"
+        text = (
+            f"{mode}: {len(self.changed_courses)}/{self.courses} course(s) re-synced, "
+            f"{self.assignments} assignment(s), {self.statuses_refreshed} status(es), "
+            f"{self.grade_items} grade item(s), {self.calendar_events} event(s)"
+        )
+        if self.detection_warnings:
+            text += f", {self.detection_warnings} update-detection warning(s)"
+        if self.item_warnings:
+            text += f", {len(self.item_warnings)} item warning(s)"
+        return text
 
 
 class MoodleSync:
@@ -64,6 +102,89 @@ class MoodleSync:
         for course_id, classification in classifications.items():
             repo.set_course_timeline_classification(self._conn, course_id, classification)
         return classifications
+
+    def sync_changes(self, since: int | None, now: int | None = None) -> SyncReport:
+        """One scheduled synchronization cycle - incremental when possible.
+
+        since=None is a full synchronization of every enrolled course (first
+        run, Scheduler startup). Otherwise core_course_get_updates_since
+        decides which courses' contents to re-fetch. A course counts as
+        changed when the API reports any updated module, OR any warning (a
+        warning means some module's changes are invisible to the API - fail
+        closed), OR its contents were never stored.
+
+        Only entities Moodle returned in THIS run are iterated: rows are never
+        deleted, so DB-derived lists would include dropped courses and deleted
+        assignments that now fail on every call. A non-authentication API
+        error on one assignment's status or one course's grades becomes an
+        item warning (stored values left untouched); authentication,
+        connection and HTTP errors propagate, failing the whole run so the
+        caller's checkpoint does not advance.
+
+        Known API limits (closed research): no deletion signal and no
+        intermediate history, so a quiet incremental run is not a global
+        reconciliation - only a full run (since=None) re-fetches everything.
+        """
+        now = int(time.time()) if now is None else now
+        user = self.sync_profile()
+        courses = self.sync_courses(user.id)
+        self.sync_course_classification()
+        course_ids = [course.id for course in courses]
+
+        changed: list[int] = []
+        detection_warnings = 0
+        for course_id in course_ids:
+            if since is None or not repo.course_has_contents(self._conn, course_id):
+                changed.append(course_id)
+                continue
+            updates = self._client.get_updates_since(course_id, since)
+            warnings = updates.get("warnings") or []
+            detection_warnings += len(warnings)
+            if updates.get("instances") or warnings:
+                changed.append(course_id)
+
+        for course_id in changed:
+            self.sync_course_contents(course_id)
+
+        assignments = self.sync_assignments(course_ids)
+        returned_ids = {assignment.id for assignment in assignments}
+        changed_set = set(changed)
+        status_ids = {a.id for a in assignments if a.course_id in changed_set}
+        status_ids |= repo.get_assignment_ids_needing_status(self._conn, now) & returned_ids
+
+        item_warnings: list[str] = []
+        statuses_refreshed = 0
+        for assignment_id in sorted(status_ids):
+            try:
+                self.sync_assignment_submission_status(assignment_id)
+                statuses_refreshed += 1
+            except MoodleAuthenticationError:
+                raise
+            except MoodleAPIError as exc:
+                item_warnings.append(f"submission status of assignment {assignment_id}: {exc}")
+
+        grade_items = 0
+        for course_id in changed:
+            try:
+                grade_items += len(self.sync_grades(course_id, user.id))
+            except MoodleAuthenticationError:
+                raise
+            except MoodleAPIError as exc:
+                item_warnings.append(f"grades of course {course_id}: {exc}")
+
+        events = self.sync_calendar(course_ids)
+
+        return SyncReport(
+            full=since is None,
+            courses=len(course_ids),
+            changed_courses=tuple(changed),
+            detection_warnings=detection_warnings,
+            assignments=len(assignments),
+            statuses_refreshed=statuses_refreshed,
+            grade_items=grade_items,
+            calendar_events=len(events),
+            item_warnings=tuple(item_warnings),
+        )
 
     def sync_course_contents(self, course_id: int) -> list[CourseSection]:
         """core_course_get_contents -> course_sections, course_modules, course_files."""

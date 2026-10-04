@@ -154,6 +154,50 @@ CREATE TABLE IF NOT EXISTS extracted_documents (
     extracted_at TEXT NOT NULL
 );
 
+-- Moodle's own timemodified of the original, as last confirmed by a
+-- *successful* ingest() (including an unchanged-content no-op). Lets
+-- Ingestion tell "Moodle changed this file since we last checked it" by
+-- comparing Moodle's clock with Moodle's clock - never with local time.
+CREATE TABLE IF NOT EXISTS ingestion_source_checks (
+    resource_id INTEGER PRIMARY KEY REFERENCES resources(id),
+    source_timemodified INTEGER,
+    checked_at TEXT NOT NULL
+);
+
+-- Scheduler MVP (.ai/SCHEDULER-MVP-RULES.md). One row per job attempt.
+CREATE TABLE IF NOT EXISTS scheduler_executions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_name TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    finished_at TEXT,
+    duration_seconds REAL,
+    items_processed INTEGER,
+    detail TEXT,
+    error TEXT
+);
+
+-- Manual job requests from another process (`python -m scheduler --job`)
+-- for the running scheduler to pick up. Rows are deleted once handled.
+CREATE TABLE IF NOT EXISTS scheduler_requests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    job_name TEXT NOT NULL,
+    requested_at TEXT NOT NULL
+);
+
+-- Notification deduplication: identity is (type, subject, scheduled_for),
+-- e.g. ('assignment_due_soon', 'assignment:104926', <deadline>).
+CREATE TABLE IF NOT EXISTS notifications_sent (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    notification_type TEXT NOT NULL,
+    subject_key TEXT NOT NULL,
+    scheduled_for TEXT NOT NULL,
+    sent_at TEXT NOT NULL,
+    UNIQUE (notification_type, subject_key, scheduled_for)
+);
+
 -- Read Model query support. Each index below backs a specific query the
 -- Read Model actually runs (see src/read_model/) - not a blanket "index
 -- everything". Columns already covered by a PRIMARY KEY or UNIQUE
@@ -166,6 +210,8 @@ CREATE INDEX IF NOT EXISTS idx_calendar_events_timestart ON calendar_events(time
 CREATE INDEX IF NOT EXISTS idx_resources_course_id ON resources(course_id);
 CREATE INDEX IF NOT EXISTS idx_extracted_documents_resource_version_id
     ON extracted_documents(resource_version_id);
+CREATE INDEX IF NOT EXISTS idx_scheduler_executions_job_status
+    ON scheduler_executions(job_name, status);
 """
 
 

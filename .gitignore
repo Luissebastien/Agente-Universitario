@@ -21,10 +21,17 @@ env/
 *.pem
 *.key
 
-# Local databases
+# Local databases (and SQLite journal side files, which hold raw private pages)
 *.db
 *.sqlite
 *.sqlite3
+*.db-journal
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Scheduler single-instance lock files
+*.lock
 
 # Local data (ingested original files, Storage backend root)
 data/

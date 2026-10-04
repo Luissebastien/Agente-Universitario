@@ -1,4 +1,6 @@
+import http.client
 import json
+import traceback
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -7,6 +9,7 @@ from moodle.exceptions import (
     MoodleAPIError,
     MoodleAuthenticationError,
     MoodleConnectionError,
+    MoodleError,
     MoodleHTTPError,
     MoodleUntrustedURLError,
 )
@@ -245,6 +248,38 @@ class GetEnrolledCoursesByTimelineClassificationTests(unittest.TestCase):
             client.get_enrolled_courses_by_timeline_classification("past")
 
 
+class GetUpdatesSinceTests(unittest.TestCase):
+    @patch("moodle.client.http.client.HTTPSConnection")
+    def test_sends_courseid_and_since_and_returns_raw_payload(self, mock_conn_cls: MagicMock) -> None:
+        payload = {
+            "instances": [
+                {"contextlevel": "module", "id": 1144540,
+                 "updates": [{"name": "configuration", "timeupdated": 1785597299}]},
+            ],
+            "warnings": [],
+        }
+        mock_conn_cls.return_value = make_fake_connection(200, payload)
+        client = MoodleClient("https://campusvirtual.example.edu", FAKE_TOKEN)
+
+        result = client.get_updates_since(21164, 1787777578)
+
+        self.assertEqual(result, payload)
+        body = mock_conn_cls.return_value.request.call_args.kwargs["body"]
+        self.assertIn("wsfunction=core_course_get_updates_since", body)
+        self.assertIn("courseid=21164", body)
+        self.assertIn("since=1787777578", body)
+
+    @patch("moodle.client.http.client.HTTPSConnection")
+    def test_moodle_api_error_raises_consistently(self, mock_conn_cls: MagicMock) -> None:
+        mock_conn_cls.return_value = make_fake_connection(
+            200, {"exception": "dml_missing_record_exception", "errorcode": "invalidrecordunknown",
+                  "message": "No se puede encontrar el registro de datos en la base de datos."}
+        )
+        client = MoodleClient("https://campusvirtual.example.edu", FAKE_TOKEN)
+        with self.assertRaises(MoodleAPIError):
+            client.get_updates_since(999999999, 0)
+
+
 class DownloadFileTests(unittest.TestCase):
     @patch("moodle.client.urllib.request.urlopen")
     def test_appends_token_to_plain_url(self, mock_urlopen: MagicMock) -> None:
@@ -289,6 +324,59 @@ class DownloadFileTests(unittest.TestCase):
 
         with self.assertRaises(MoodleAuthenticationError):
             client.download_file("https://campusvirtual.example.edu/file.php")
+
+
+class DownloadFileDoesNotLeakTokenTests(unittest.TestCase):
+    """Regression: some urllib/http.client failures embed the *authenticated*
+    URL (token included) in the exception itself. They used to escape
+    download_file unwrapped, so any traceback/log of them printed the token."""
+
+    URL_WITH_SPACE = "https://campusvirtual.example.edu/webservice/pluginfile.php/1/My File.pdf"
+
+    def _assert_no_token(self, exc: BaseException) -> None:
+        rendered = "".join(traceback.format_exception(exc))
+        for text in (str(exc), repr(exc), rendered):
+            self.assertNotIn(FAKE_TOKEN, text)
+
+    def _raise_with_url(self, factory):
+        def side_effect(url, timeout=None):
+            raise factory(url)
+        return side_effect
+
+    @patch("moodle.client.urllib.request.urlopen")
+    def test_invalid_url_is_wrapped_without_the_token(self, mock_urlopen: MagicMock) -> None:
+        mock_urlopen.side_effect = self._raise_with_url(
+            lambda url: http.client.InvalidURL(f"URL can't contain control characters. {url!r}")
+        )
+        client = MoodleClient("https://campusvirtual.example.edu", FAKE_TOKEN)
+
+        with self.assertRaises(MoodleConnectionError) as ctx:
+            client.download_file(self.URL_WITH_SPACE)
+
+        self.assertIn(FAKE_TOKEN, mock_urlopen.call_args[0][0])  # the token really was in play
+        self._assert_no_token(ctx.exception)
+
+    @patch("moodle.client.urllib.request.urlopen")
+    def test_incomplete_read_is_wrapped_without_the_token(self, mock_urlopen: MagicMock) -> None:
+        mock_urlopen.side_effect = http.client.IncompleteRead(b"partial", 100)
+        client = MoodleClient("https://campusvirtual.example.edu", FAKE_TOKEN)
+
+        with self.assertRaises(MoodleConnectionError) as ctx:
+            client.download_file(self.URL_WITH_SPACE)
+
+        self._assert_no_token(ctx.exception)
+
+    @patch("moodle.client.urllib.request.urlopen")
+    def test_unicode_encode_error_is_wrapped_without_the_token(self, mock_urlopen: MagicMock) -> None:
+        mock_urlopen.side_effect = self._raise_with_url(
+            lambda url: UnicodeEncodeError("ascii", url, 0, 1, "ordinal not in range(128)")
+        )
+        client = MoodleClient("https://campusvirtual.example.edu", FAKE_TOKEN)
+
+        with self.assertRaises(MoodleError) as ctx:
+            client.download_file(self.URL_WITH_SPACE)
+
+        self._assert_no_token(ctx.exception)
 
 
 class DownloadFileHostRestrictionTests(unittest.TestCase):

@@ -19,21 +19,39 @@ class ResourceSourceAdapter(abc.ABC):
     def discover(self, conn: sqlite3.Connection) -> Iterable[ResourceDescriptor]: ...
 
 
+# MoodleSync never deletes rows: a file/module Moodle no longer returns (deleted,
+# hidden, or renamed under a new fileurl) keeps its old row. sync_course_contents
+# upserts sections, then modules, then files, so every row Moodle returned in a
+# course's latest contents sync is stamped at or after that sync's sections.
+# Rows older than the course's newest section stamp are therefore stale and are
+# not offered to Ingestion. Courses never content-synced have no sections, the
+# comparison is NULL, and nothing is filtered.
+_CURRENT_ROW_FILTER = """
+    NOT ({alias}.last_synced_at < (
+        SELECT MAX(s.last_synced_at) FROM course_sections s WHERE s.course_id = cm.course_id
+    ))
+"""
+
+
 class MoodleFileSourceAdapter(ResourceSourceAdapter):
-    """Candidate resources from course_files (real downloadable files)."""
+    """Candidate resources from course_files (real downloadable files) that
+    Moodle still returned in the course's latest contents sync."""
 
     def discover(self, conn: sqlite3.Connection) -> Iterable[ResourceDescriptor]:
         rows = conn.execute(
-            """
+            f"""
             SELECT
                 cf.fileurl AS fileurl,
                 cf.filename AS filename,
                 cf.mimetype AS mimetype,
+                cf.timemodified AS timemodified,
                 cf.module_id AS module_id,
                 cm.course_id AS course_id,
                 cm.section_id AS section_id
             FROM course_files cf
             JOIN course_modules cm ON cm.id = cf.module_id
+            WHERE {_CURRENT_ROW_FILTER.format(alias="cf")}
+            ORDER BY cf.id
             """
         ).fetchall()
 
@@ -48,6 +66,7 @@ class MoodleFileSourceAdapter(ResourceSourceAdapter):
                 name=row["filename"],
                 source_url=row["fileurl"],
                 mimetype=row["mimetype"],
+                source_timemodified=row["timemodified"],
             )
 
 
@@ -61,10 +80,12 @@ class MoodleUrlSourceAdapter(ResourceSourceAdapter):
 
     def discover(self, conn: sqlite3.Connection) -> Iterable[ResourceDescriptor]:
         rows = conn.execute(
-            """
-            SELECT id, course_id, section_id, name, url
-            FROM course_modules
-            WHERE modname = 'url' AND url IS NOT NULL AND url != ''
+            f"""
+            SELECT cm.id, cm.course_id, cm.section_id, cm.name, cm.url
+            FROM course_modules cm
+            WHERE cm.modname = 'url' AND cm.url IS NOT NULL AND cm.url != ''
+              AND {_CURRENT_ROW_FILTER.format(alias="cm")}
+            ORDER BY cm.id
             """
         ).fetchall()
 

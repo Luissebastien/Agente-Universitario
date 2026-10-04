@@ -18,10 +18,11 @@ from moodle.models import (
     Grade,
     MoodleUser,
 )
-from moodle.sync import MoodleSync
+from moodle.sync import MoodleSync, SyncReport
 
 __all__ = [
     "MoodleClient",
+    "SyncReport",
     "MoodleError",
     "MoodleConnectionError",
     "MoodleHTTPError",

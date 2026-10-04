@@ -84,6 +84,50 @@ def upsert_resource(conn: sqlite3.Connection, descriptor: ResourceDescriptor) ->
     return _row_to_resource(row)
 
 
+def find_resource_state(
+    conn: sqlite3.Connection, origin: str, source_type: str, external_reference: str
+) -> tuple[int, str] | None:
+    """(resource_id, last_synced_at) for an identity, without creating it.
+
+    last_synced_at is stamped by upsert_resource at the start of every
+    ingest() attempt - failed ones included - so it doubles as "time of the
+    last ingestion attempt" for fair ordering of pending work.
+    """
+    row = conn.execute(
+        """
+        SELECT id, last_synced_at FROM resources
+        WHERE origin = ? AND source_type = ? AND external_reference = ?
+        """,
+        (origin, source_type, external_reference),
+    ).fetchone()
+    return (row["id"], row["last_synced_at"]) if row else None
+
+
+def get_source_check(conn: sqlite3.Connection, resource_id: int) -> tuple[bool, int | None]:
+    """(checked?, source_timemodified confirmed by the last successful ingest)."""
+    row = conn.execute(
+        "SELECT source_timemodified FROM ingestion_source_checks WHERE resource_id = ?",
+        (resource_id,),
+    ).fetchone()
+    return (True, row["source_timemodified"]) if row else (False, None)
+
+
+def record_source_check(
+    conn: sqlite3.Connection, resource_id: int, source_timemodified: int | None
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO ingestion_source_checks (resource_id, source_timemodified, checked_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(resource_id) DO UPDATE SET
+            source_timemodified = excluded.source_timemodified,
+            checked_at = excluded.checked_at
+        """,
+        (resource_id, source_timemodified, _now()),
+    )
+    conn.commit()
+
+
 def get_resource(conn: sqlite3.Connection, resource_id: int) -> Resource | None:
     row = conn.execute("SELECT * FROM resources WHERE id = ?", (resource_id,)).fetchone()
     return _row_to_resource(row) if row else None

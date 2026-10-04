@@ -1,4 +1,4 @@
-from extraction.extract import Extraction, ExtractionError
+from extraction.extract import Extraction, ExtractionBatchResult, ExtractionError
 from extraction.extractors import (
     DEFAULT_EXTRACTORS,
     DocxExtractor,
@@ -21,6 +21,7 @@ from extraction.ocr import DoctrOcrEngine, OcrEngine, OcrResult, deskew, estimat
 
 __all__ = [
     "Extraction",
+    "ExtractionBatchResult",
     "ExtractionError",
     "ExtractedDocument",
     "Extractor",

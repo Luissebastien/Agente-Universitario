@@ -1,4 +1,4 @@
-from ingestion.ingest import Ingestion, IngestionError
+from ingestion.ingest import Ingestion, IngestionBatchResult, IngestionError
 from ingestion.models import Resource, ResourceDescriptor, ResourceVersion
 from ingestion.source_adapters import (
     MoodleFileSourceAdapter,
@@ -9,6 +9,7 @@ from ingestion.storage import FilesystemStorage, Storage, StorageError, StorageN
 
 __all__ = [
     "Ingestion",
+    "IngestionBatchResult",
     "IngestionError",
     "Resource",
     "ResourceDescriptor",

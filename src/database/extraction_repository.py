@@ -66,6 +66,48 @@ def get_extracted_documents(
     return [_row_to_document(row) for row in rows]
 
 
+def get_pending_version_ids(
+    conn: sqlite3.Connection,
+    depth: str,
+    max_failed_attempts: int,
+    unsupported_extractor_name: str,
+) -> list[int]:
+    """Current (latest-version) ResourceVersions still needing extraction at `depth`.
+
+    Historical versions are never returned. A version stops being pending
+    once it has a 'done' attempt, an explicit unsupported-format attempt, or
+    max_failed_attempts failed attempts - so transient failures are retried
+    a bounded number of times and permanent ones never loop forever.
+    Never-attempted versions come first.
+    """
+    rows = conn.execute(
+        """
+        SELECT rv.id,
+               (SELECT COUNT(*) FROM extracted_documents f
+                WHERE f.resource_version_id = rv.id AND f.depth = :depth
+                  AND f.status = 'failed') AS failed_count
+        FROM resource_versions rv
+        WHERE rv.version_number = (
+                SELECT MAX(v2.version_number) FROM resource_versions v2
+                WHERE v2.resource_id = rv.resource_id)
+          AND NOT EXISTS (
+                SELECT 1 FROM extracted_documents ed
+                WHERE ed.resource_version_id = rv.id AND ed.depth = :depth
+                  AND (ed.status = 'done' OR ed.extractor_name = :unsupported))
+          AND (SELECT COUNT(*) FROM extracted_documents f
+               WHERE f.resource_version_id = rv.id AND f.depth = :depth
+                 AND f.status = 'failed') < :max_failed
+        ORDER BY failed_count, rv.id
+        """,
+        {
+            "depth": depth,
+            "unsupported": unsupported_extractor_name,
+            "max_failed": max_failed_attempts,
+        },
+    ).fetchall()
+    return [row["id"] for row in rows]
+
+
 def get_latest_extraction(
     conn: sqlite3.Connection, resource_version_id: int, depth: str
 ) -> ExtractedDocument | None:

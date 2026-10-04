@@ -20,6 +20,11 @@ class ResourceDescriptor:
     name: str
     source_url: str  # fileurl to download (file) or the target URL itself (url)
     mimetype: str | None = None
+    # The source's own modification time (Moodle's file timemodified, Unix
+    # seconds) when the adapter knows it. Lets Ingestion decide whether an
+    # already-ingested file must be re-checked without downloading it -
+    # comparing Moodle's clock with Moodle's clock, never with local time.
+    source_timemodified: int | None = None
 
 
 @dataclass(frozen=True)

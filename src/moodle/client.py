@@ -14,6 +14,7 @@ from moodle.exceptions import (
     MoodleAPIError,
     MoodleAuthenticationError,
     MoodleConnectionError,
+    MoodleError,
     MoodleHTTPError,
     MoodleUntrustedURLError,
 )
@@ -237,6 +238,19 @@ class MoodleClient:
         )
         return data.get("courses", [])
 
+    def get_updates_since(self, course_id: int, since: int) -> dict[str, Any]:
+        """core_course_get_updates_since: which of the user-visible modules
+        of one course changed after `since` (Unix seconds, strictly greater).
+
+        Returns Moodle's raw {"instances": [...], "warnings": [...]} - no
+        interpretation here. Known limits (closed research, MOODLE_500_STABLE):
+        deletions produce no signal, `timeupdated` is only present for the
+        `configuration` area, and `itemids` mean different things per area.
+        """
+        return self.call(
+            "core_course_get_updates_since", {"courseid": course_id, "since": since}
+        )
+
     def _assert_trusted_file_url(self, file_url: str, parsed: urllib.parse.SplitResult) -> None:
         """Refuse to send the token anywhere but the configured Moodle host.
 
@@ -284,6 +298,19 @@ class MoodleClient:
             raise MoodleConnectionError(
                 f"Could not download Moodle file: {_redact_url(file_url)}"
             ) from exc
+        except http.client.HTTPException:
+            # e.g. IncompleteRead on a truncated body, or InvalidURL for a
+            # fileurl with control characters - InvalidURL's own message
+            # embeds the authenticated URL, so the original is never chained.
+            raise MoodleConnectionError(
+                f"Could not download Moodle file: {_redact_url(file_url)}"
+            ) from None
+        except ValueError:
+            # e.g. UnicodeEncodeError for a non-ASCII fileurl - the exception
+            # object carries the authenticated URL (token included).
+            raise MoodleError(
+                f"Could not download Moodle file (invalid URL): {_redact_url(file_url)}"
+            ) from None
 
         # Moodle serves API errors (e.g. an invalid/expired token) as HTTP 200
         # with a JSON error body here too, mirroring the REST endpoint.

@@ -154,6 +154,32 @@ def set_course_timeline_classification(
     conn.commit()
 
 
+def course_has_contents(conn: sqlite3.Connection, course_id: int) -> bool:
+    """Whether sync_course_contents() has ever stored this course's sections."""
+    row = conn.execute(
+        "SELECT 1 FROM course_sections WHERE course_id = ? LIMIT 1", (course_id,)
+    ).fetchone()
+    return row is not None
+
+
+def get_assignment_ids_needing_status(conn: sqlite3.Connection, now: int) -> set[int]:
+    """Assignments whose submission status must be refreshed every sync cycle:
+    never synced, or still open (real future due date) and not yet known as
+    'submitted'. Incremental change detection cannot see every status change
+    (e.g. a teammate submitting a group assignment), and these are exactly
+    the rows a deadline reminder would be based on."""
+    rows = conn.execute(
+        """
+        SELECT a.id FROM assignments a
+        LEFT JOIN assignment_submission_status s ON s.assignment_id = a.id
+        WHERE s.assignment_id IS NULL
+           OR (a.duedate > ? AND (s.submission_status IS NULL OR s.submission_status != 'submitted'))
+        """,
+        (now,),
+    ).fetchall()
+    return {row["id"] for row in rows}
+
+
 def get_course_modules(conn: sqlite3.Connection, course_id: int) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT * FROM course_modules WHERE course_id = ? ORDER BY id", (course_id,)
@@ -191,7 +217,7 @@ def get_assignments(conn: sqlite3.Connection, course_id: int) -> list[sqlite3.Ro
 _ASSIGNMENTS_WITH_STATUS_SQL = """
     SELECT
         a.id, a.course_id, a.name, a.duedate, a.allowsubmissionsfromdate, a.cutoffdate, a.grade,
-        s.submission_status, s.grading_status
+        a.last_synced_at, s.submission_status, s.grading_status
     FROM assignments a
     LEFT JOIN assignment_submission_status s ON s.assignment_id = a.id
 """

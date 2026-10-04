@@ -63,6 +63,7 @@ def _row_to_assignment_summary(row: sqlite3.Row, now: int) -> AssignmentSummary:
         grade=row["grade"], submission_status=row["submission_status"],
         grading_status=row["grading_status"],
         is_pending=is_assignment_pending(row["duedate"], row["submission_status"], now),
+        last_synced_at=row["last_synced_at"],
     )
 
 

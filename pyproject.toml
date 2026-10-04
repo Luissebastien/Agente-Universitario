@@ -37,6 +37,12 @@ dependencies = [
     # explicitly rather than relying on it arriving transitively via doctr/torch.
     "numpy>=2.0",
     "Pillow>=12.0",
+    # IANA time zone data for the stdlib zoneinfo module. The Scheduler runs
+    # in America/Santo_Domingo regardless of the host OS timezone, and on
+    # Windows zoneinfo has no system tz database at all (verified:
+    # ZoneInfoNotFoundError without this package). Pure data, maintained by
+    # CPython core developers (PEP 615's official fallback).
+    "tzdata>=2024.1",
 ]
 
 [tool.setuptools]

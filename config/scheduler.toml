@@ -1,0 +1,40 @@
+# Agente U - Scheduler MVP configuration (.ai/SCHEDULER-MVP-RULES.md).
+#
+# Secrets are NEVER configured here: MOODLE_URL and MOODLE_TOKEN come from
+# environment variables only. DATABASE_URL in .env.example is not read; the
+# database location is `database_path` below.
+#
+# Relative paths are resolved against THIS file's directory. The defaults
+# keep private data in <project>/data/, which .gitignore excludes. NOTE: this
+# project lives in a OneDrive-synced folder; to keep the private database and
+# downloaded originals out of the cloud, point both paths to a folder that is
+# not synced (e.g. "C:/Users/<you>/AppData/Local/AgenteU/agente_u.sqlite3").
+
+[scheduler]
+timezone = "America/Santo_Domingo"
+database_path = "../data/agente_u.sqlite3"
+storage_path = "../data/originals"
+# Pause between the (at most 3) attempts of a failing job.
+retry_delay_seconds = 60
+# Whether `python -m scheduler --job NAME` may run a job disabled below.
+allow_manual_disabled_jobs = false
+
+[moodle_sync]
+enabled = true
+interval_hours = 6
+
+[ingestion]
+enabled = true
+# Processing budget per run; whatever is left stays pending for the next run.
+max_items = 100
+max_seconds = 1800
+
+[extraction]
+enabled = true
+max_items = 50
+max_seconds = 1800
+
+[notifications]
+enabled = true
+# Remind about a pending assignment once it is due within this many hours.
+due_soon_hours = 24

@@ -54,6 +54,12 @@ class AssignmentSummary:
     submission_status: str | None
     grading_status: str | None
     is_pending: bool
+    # When MoodleSync last saw this assignment in Moodle's response. Rows are
+    # never deleted, so an assignment Moodle stopped returning (deleted, or
+    # its course dropped) keeps an older value - callers that must only act
+    # on currently-confirmed assignments (deadline reminders) compare this
+    # against the start of the last successful sync.
+    last_synced_at: str | None = None
 
 
 @dataclass(frozen=True)
