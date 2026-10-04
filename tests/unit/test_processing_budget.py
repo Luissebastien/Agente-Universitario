@@ -249,10 +249,10 @@ class ExtractionPendingTests(StorageTestCase):
         extraction = Extraction(self.storage, self.conn)
         original = extraction.extract
 
-        def extract(version_id, depth="basic"):
+        def extract(version_id, depth="basic", should_stop=lambda: False):
             if version_id == bad.id:
                 raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed")
-            return original(version_id, depth)
+            return original(version_id, depth, should_stop)
 
         extraction.extract = extract
         result = extraction.extract_pending("basic", 10, 999)

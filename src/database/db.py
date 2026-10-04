@@ -164,6 +164,23 @@ CREATE TABLE IF NOT EXISTS ingestion_source_checks (
     checked_at TEXT NOT NULL
 );
 
+-- Resources deliberately NOT ingested, and why. Today the only reason is
+-- 'oversized': a file over the per-download limit is never read, so there is
+-- no ResourceVersion to record the decision against. Both the size seen and
+-- the limit in force are stored so the limit can be retuned later from real
+-- data, and so old rows still explain themselves once it changes.
+-- One row per resource (the latest decision), keyed to the exact source
+-- version evaluated: if Moodle reports a new timemodified the row no longer
+-- matches and the resource is offered for ingestion again.
+CREATE TABLE IF NOT EXISTS ingestion_deferrals (
+    resource_id INTEGER PRIMARY KEY REFERENCES resources(id),
+    reason TEXT NOT NULL,
+    size_bytes INTEGER,
+    limit_bytes INTEGER NOT NULL,
+    source_timemodified INTEGER,
+    deferred_at TEXT NOT NULL
+);
+
 -- Scheduler MVP (.ai/SCHEDULER-MVP-RULES.md). One row per job attempt.
 CREATE TABLE IF NOT EXISTS scheduler_executions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

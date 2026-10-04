@@ -12,7 +12,11 @@ from database import ingestion_repository as repo
 from ingestion.models import ResourceDescriptor, ResourceVersion
 from ingestion.storage import Storage, StorageError
 from moodle.client import MoodleClient
-from moodle.exceptions import MoodleAuthenticationError, MoodleError
+from moodle.exceptions import (
+    MoodleAuthenticationError,
+    MoodleError,
+    MoodleResourceTooLargeError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +35,10 @@ class IngestionBatchResult:
     new_versions: int
     failed: int
     first_error: str | None = None
+    # Attempted items deliberately not ingested (today: over the size limit).
+    # Not failures: the decision is recorded in ingestion_deferrals and the
+    # item stops being offered until its source version changes.
+    deferred: int = 0
 
     @property
     def remaining(self) -> int:
@@ -127,7 +135,9 @@ class Ingestion:
 
         Read-only and network-free. Pending means:
           - no Resource for this identity yet, or no stored version (an earlier
-            attempt failed - retried, but after everything else);
+            attempt failed - retried, but after everything else), unless this
+            exact source version was already evaluated and skipped on purpose
+            (see _is_deferred);
           - url: the preserved reference string differs from the latest version;
           - file: Moodle's timemodified differs from the one confirmed by the
             last successful ingest() (or none was ever confirmed). A changed
@@ -153,10 +163,15 @@ class Ingestion:
         One failing item never stops the batch (DEC-048): its error is
         counted and it stays pending. Only systemic failures (rejected
         credentials, database errors) propagate and fail the whole job.
+
+        A file over the download limit is neither a success nor a failure:
+        it is counted in `deferred`, recorded in ingestion_deferrals with
+        the size seen and the limit in force, and stops being offered until
+        Moodle reports a different source version. `--status` lists those.
         """
         items = self._pending_items(descriptors)
         started = monotonic()
-        attempted = succeeded = new_versions = failed = 0
+        attempted = succeeded = new_versions = failed = deferred = 0
         first_error: str | None = None
 
         for item in items:
@@ -170,6 +185,18 @@ class Ingestion:
                     repo.record_source_check(
                         self._conn, version.resource_id, descriptor.source_timemodified
                     )
+                    # It fits now (limit raised, or a smaller replacement), so
+                    # any earlier skip decision no longer describes reality.
+                    repo.clear_deferral(self._conn, version.resource_id)
+            except MoodleResourceTooLargeError as exc:
+                self._conn.rollback()
+                deferred += 1
+                self._defer(descriptor, repo.REASON_OVERSIZED, exc.size_bytes, exc.limit_bytes)
+                logger.warning(
+                    "Ingestion of %s/%s deferred: %s",
+                    descriptor.origin, descriptor.source_type, exc,
+                )
+                continue
             except Exception as exc:  # noqa: BLE001 - per-item isolation, see docstring
                 if _is_systemic(exc):
                     raise
@@ -193,6 +220,29 @@ class Ingestion:
             new_versions=new_versions,
             failed=failed,
             first_error=first_error,
+            deferred=deferred,
+        )
+
+    def _defer(
+        self,
+        descriptor: ResourceDescriptor,
+        reason: str,
+        size_bytes: int | None,
+        limit_bytes: int,
+    ) -> None:
+        """Persist "evaluated, not ingested" for this exact source version.
+
+        ingest() already upserted the Resource before downloading, so the row
+        it is keyed to exists even though no ResourceVersion was created.
+        """
+        state = repo.find_resource_state(
+            self._conn, descriptor.origin, descriptor.source_type, descriptor.external_reference
+        )
+        if state is None:  # pragma: no cover - ingest() upserts it first
+            return
+        repo.record_deferral(
+            self._conn, state[0], reason, size_bytes, limit_bytes,
+            descriptor.source_timemodified,
         )
 
     def _pending_items(self, descriptors: Iterable[ResourceDescriptor]) -> list[_PendingItem]:
@@ -205,6 +255,8 @@ class Ingestion:
             resource_id, last_attempt_at = state
             latest = repo.get_latest_version(self._conn, resource_id)
             if latest is None:
+                if self._is_deferred(resource_id, d):
+                    continue
                 items.append(
                     _PendingItem(d, None, (_GROUP_RETRY, last_attempt_at, d.external_reference))
                 )
@@ -221,10 +273,30 @@ class Ingestion:
         items.sort(key=lambda item: item.sort_key)
         return items
 
+    def _is_deferred(self, resource_id: int, descriptor: ResourceDescriptor) -> bool:
+        """Was this exact source version already evaluated and skipped?
+
+        Only this version: once Moodle reports a different timemodified the
+        decision is stale and the resource becomes pending again (and is
+        skipped again, with the new size recorded, if it still does not fit).
+        A plain download failure never records a deferral, so ordinary
+        retries are unaffected.
+        """
+        deferral = repo.get_deferral(self._conn, resource_id)
+        return (
+            deferral is not None
+            and deferral["source_timemodified"] == descriptor.source_timemodified
+        )
+
     def _fetch_content(self, descriptor: ResourceDescriptor) -> bytes:
         if descriptor.source_type == "file":
             try:
                 return self._client.download_file(descriptor.source_url)
+            except MoodleResourceTooLargeError:
+                # An explicit size decision, not a download failure: it must
+                # stay distinguishable so ingest_pending() can record it and
+                # stop re-offering the item (see its handler).
+                raise
             except MoodleError as exc:
                 raise IngestionError(
                     f"Download failed for {descriptor.origin}/{descriptor.source_type} "

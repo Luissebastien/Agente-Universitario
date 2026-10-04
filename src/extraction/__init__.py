@@ -2,6 +2,7 @@ from extraction.extract import Extraction, ExtractionBatchResult, ExtractionErro
 from extraction.extractors import (
     DEFAULT_EXTRACTORS,
     DocxExtractor,
+    ExtractionInterrupted,
     Extractor,
     ExtractionResult,
     HtmlExtractor,
@@ -17,12 +18,20 @@ from extraction.extractors import (
     is_native_text_sufficient,
 )
 from extraction.models import ExtractedDocument
-from extraction.ocr import DoctrOcrEngine, OcrEngine, OcrResult, deskew, estimate_skew_angle
+from extraction.ocr import (
+    DoctrOcrEngine,
+    ImageTooLargeError,
+    OcrEngine,
+    OcrResult,
+    deskew,
+    estimate_skew_angle,
+)
 
 __all__ = [
     "Extraction",
     "ExtractionBatchResult",
     "ExtractionError",
+    "ExtractionInterrupted",
     "ExtractedDocument",
     "Extractor",
     "ExtractionResult",
@@ -42,6 +51,7 @@ __all__ = [
     "OcrEngine",
     "OcrResult",
     "DoctrOcrEngine",
+    "ImageTooLargeError",
     "deskew",
     "estimate_skew_angle",
 ]

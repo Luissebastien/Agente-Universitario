@@ -128,6 +128,65 @@ def record_source_check(
     conn.commit()
 
 
+REASON_OVERSIZED = "oversized"
+
+
+def record_deferral(
+    conn: sqlite3.Connection,
+    resource_id: int,
+    reason: str,
+    size_bytes: int | None,
+    limit_bytes: int,
+    source_timemodified: int | None,
+) -> None:
+    """Record that this exact source version was evaluated and not ingested.
+
+    Replaces any previous decision for the resource: what matters
+    operationally is the current set of skipped resources and their sizes,
+    which is what the limit is retuned from.
+    """
+    conn.execute(
+        """
+        INSERT INTO ingestion_deferrals
+            (resource_id, reason, size_bytes, limit_bytes, source_timemodified, deferred_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(resource_id) DO UPDATE SET
+            reason = excluded.reason,
+            size_bytes = excluded.size_bytes,
+            limit_bytes = excluded.limit_bytes,
+            source_timemodified = excluded.source_timemodified,
+            deferred_at = excluded.deferred_at
+        """,
+        (resource_id, reason, size_bytes, limit_bytes, source_timemodified, _now()),
+    )
+    conn.commit()
+
+
+def get_deferral(conn: sqlite3.Connection, resource_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM ingestion_deferrals WHERE resource_id = ?", (resource_id,)
+    ).fetchone()
+
+
+def list_deferrals(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Every currently skipped resource, with enough provenance to act on it."""
+    return conn.execute(
+        """
+        SELECT d.*, r.name AS name, r.course_id AS course_id, r.source_type AS source_type
+        FROM ingestion_deferrals d
+        JOIN resources r ON r.id = d.resource_id
+        ORDER BY d.size_bytes DESC, d.resource_id
+        """
+    ).fetchall()
+
+
+def clear_deferral(conn: sqlite3.Connection, resource_id: int) -> None:
+    """Drop the decision once the resource has actually been ingested (e.g.
+    after the limit was raised, or the file was replaced by a smaller one)."""
+    conn.execute("DELETE FROM ingestion_deferrals WHERE resource_id = ?", (resource_id,))
+    conn.commit()
+
+
 def get_resource(conn: sqlite3.Connection, resource_id: int) -> Resource | None:
     row = conn.execute("SELECT * FROM resources WHERE id = ?", (resource_id,)).fetchone()
     return _row_to_resource(row) if row else None

@@ -96,6 +96,7 @@ class PdfExtractorOcrFallbackTests(unittest.TestCase):
         extractor = PdfExtractor(ocr_engine=engine)
 
         fake_page = MagicMock()
+        fake_page.get_size.return_value = (612.0, 792.0)  # Letter, in points
         fake_pixmap = MagicMock()
         fake_pixmap.to_pil.return_value = Image.new("RGB", (10, 10))
         fake_page.render.return_value = fake_pixmap

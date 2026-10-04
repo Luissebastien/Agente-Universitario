@@ -16,12 +16,20 @@ from moodle.exceptions import (
     MoodleConnectionError,
     MoodleError,
     MoodleHTTPError,
+    MoodleResourceTooLargeError,
     MoodleUntrustedURLError,
 )
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 15.0
+# Ceiling on a single file download, which is read fully into memory (ingest()
+# needs the bytes to hash them). Measured against the real la instancia real corpus: 199
+# files, median 0.09 MB, p99 11.42 MB, largest 34.24 MB; the heaviest realistic
+# document - a 786-page textbook - is 5.93 MB. 64 MB is ~1.9x the largest file
+# actually seen and leaves every real one untouched, while an academic file
+# above it (video, image dump) is exactly the case worth a human decision.
+MAX_RESOURCE_BYTES = 64 * 1024 * 1024
 _MAX_RETRIES = 2
 _RETRY_BACKOFF_SECONDS = 1.0
 _TRANSIENT_HTTP_STATUSES = frozenset({502, 503, 504})
@@ -79,7 +87,13 @@ class MoodleClient:
     no knowledge of courses, storage, or Agente U's business logic.
     """
 
-    def __init__(self, base_url: str, token: str, timeout: float = _DEFAULT_TIMEOUT) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        token: str,
+        timeout: float = _DEFAULT_TIMEOUT,
+        max_resource_bytes: int = MAX_RESOURCE_BYTES,
+    ) -> None:
         if not base_url:
             raise ValueError("base_url is required")
         if not token:
@@ -98,6 +112,7 @@ class MoodleClient:
         self._rest_path = f"{parsed.path}/webservice/rest/server.php"
         self._token = token
         self._timeout = timeout
+        self._max_resource_bytes = max_resource_bytes
         self._connection: http.client.HTTPConnection | None = None
         self._site_userid: int | None = None
 
@@ -108,12 +123,13 @@ class MoodleClient:
         url_var: str = "MOODLE_URL",
         token_var: str = "MOODLE_TOKEN",
         timeout: float = _DEFAULT_TIMEOUT,
+        max_resource_bytes: int = MAX_RESOURCE_BYTES,
     ) -> MoodleClient:
         base_url = os.environ.get(url_var)
         token = os.environ.get(token_var)
         if not base_url or not token:
             raise ValueError(f"{url_var} and {token_var} must both be set in the environment")
-        return cls(base_url, token, timeout=timeout)
+        return cls(base_url, token, timeout=timeout, max_resource_bytes=max_resource_bytes)
 
     def close(self) -> None:
         if self._connection is not None:
@@ -291,7 +307,21 @@ class MoodleClient:
             with urllib.request.urlopen(
                 authenticated_url, timeout=timeout or self._timeout
             ) as response:
-                data = response.read()
+                # Refuse by the declared length first, so an oversized body is
+                # never read into memory at all. MoodleResourceTooLargeError is
+                # a MoodleError, not an OSError/ValueError/HTTPException, so it
+                # passes through the handlers below untouched.
+                declared = response.headers.get("Content-Length")
+                if isinstance(declared, str) and declared.strip().isdigit():
+                    size = int(declared.strip())
+                    if size > self._max_resource_bytes:
+                        raise MoodleResourceTooLargeError(size, self._max_resource_bytes)
+                # No (or unusable) Content-Length: read one byte past the limit
+                # and refuse if it is reached, so a body that lies about its
+                # size is still bounded.
+                data = response.read(self._max_resource_bytes + 1)
+                if len(data) > self._max_resource_bytes:
+                    raise MoodleResourceTooLargeError(None, self._max_resource_bytes)
         except urllib.error.HTTPError as exc:
             raise MoodleHTTPError(exc.code) from None
         except (urllib.error.URLError, OSError) as exc:

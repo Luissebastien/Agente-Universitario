@@ -10,7 +10,7 @@ from pathlib import Path
 
 from database import extraction_repository as extraction_repo
 from database import ingestion_repository as ingestion_repo
-from extraction.extractors import Extractor, build_default_extractors
+from extraction.extractors import ExtractionInterrupted, Extractor, build_default_extractors
 from extraction.models import ExtractedDocument
 from extraction.ocr import OcrEngine
 from ingestion.storage import Storage, StorageError
@@ -86,7 +86,12 @@ class Extraction:
         self._conn = conn
         self._extractors = extractors if extractors is not None else build_default_extractors(ocr_engine)
 
-    def extract(self, resource_version_id: int, depth: str = "basic") -> ExtractedDocument:
+    def extract(
+        self,
+        resource_version_id: int,
+        depth: str = "basic",
+        should_stop: Callable[[], bool] = lambda: False,
+    ) -> ExtractedDocument:
         if depth not in _VALID_DEPTHS:
             raise ExtractionError(f"Invalid depth: {depth!r} (expected one of {_VALID_DEPTHS})")
 
@@ -116,7 +121,16 @@ class Extraction:
             )
 
         try:
-            result = extractor.extract(content)
+            result = (
+                extractor.extract(content, should_stop)
+                if extractor.interruptible
+                else extractor.extract(content)
+            )
+        except ExtractionInterrupted:
+            # Deliberately recorded nowhere: the version must stay pending and
+            # intact, so the next run retries the whole document. See
+            # ExtractionInterrupted's docstring.
+            raise
         except Exception as exc:  # noqa: BLE001 - any decode/parse failure degrades safely
             return self._record_failure(
                 version.id,
@@ -158,7 +172,11 @@ class Extraction:
         """extract() pending current versions within a processing budget.
 
         Stops between items at max_items, max_seconds or should_stop(); the
-        rest stays pending for the next run. Content/format failures are
+        rest stays pending for the next run. A long per-page OCR also honours
+        should_stop() *within* an item: that raises ExtractionInterrupted,
+        which records nothing and leaves the version pending and intact.
+        There is no page or time cap per document - a scanned book is
+        legitimate material and is allowed to finish. Content/format failures are
         already recorded by extract() as 'failed' rows. Any other unexpected
         per-item exception (e.g. the extracted text cannot be stored) is also
         recorded as a failed attempt so it counts toward the bounded retry and
@@ -174,7 +192,13 @@ class Extraction:
                 break
             attempted += 1
             try:
-                doc = self.extract(version_id, depth)
+                doc = self.extract(version_id, depth, should_stop)
+            except ExtractionInterrupted as exc:
+                # Nothing was recorded for this version, so it is not an
+                # attempt: leave the counters honest and end the batch.
+                attempted -= 1
+                logger.info("Extraction of version %s interrupted: %s", version_id, exc)
+                break
             except sqlite3.OperationalError:
                 raise
             except ExtractionError:

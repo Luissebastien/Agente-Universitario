@@ -9,6 +9,7 @@ import sys
 from collections.abc import Callable
 from datetime import datetime, timezone
 
+from database import ingestion_repository as ingestion_repo
 from database import scheduler_repository as history
 from database.db import connect
 from extraction.extract import Extraction
@@ -173,9 +174,34 @@ def print_status(config: SchedulerConfig) -> int:
             failure = history.last_execution(conn, job_name, history.STATUS_FAILED)
             if failure is not None:
                 print(f"  last failure: {_local(failure.started_at, tz)}: {failure.error}")
+        _print_deferrals(conn, tz)
     finally:
         conn.close()
     return EXIT_OK
+
+
+def _print_deferrals(conn: sqlite3.Connection, tz) -> None:
+    """Resources evaluated and not ingested, largest first.
+
+    This is the place to read before retuning the download limit: it shows
+    what was actually skipped, how big it was, and which limit was in force
+    at the time.
+    """
+    deferrals = ingestion_repo.list_deferrals(conn)
+    if not deferrals:
+        return
+    print(f"\nNot ingested ({len(deferrals)} resource(s) waiting for a decision):")
+    for row in deferrals:
+        size = (
+            f"{row['size_bytes'] / 1048576:.1f} MB"
+            if row["size_bytes"] is not None
+            else "size not declared"
+        )
+        print(
+            f"  [{row['reason']}] {row['name']} - {size} "
+            f"(limit in force: {row['limit_bytes'] / 1048576:.0f} MB) "
+            f"course={row['course_id']} since {_local(row['deferred_at'], tz)}"
+        )
 
 
 # ---- helpers ------------------------------------------------------------

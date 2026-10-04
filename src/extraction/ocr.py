@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import io
+import logging
 import zipfile
 from dataclasses import dataclass, field
 from xml.etree import ElementTree as ET
@@ -9,12 +10,58 @@ from xml.etree import ElementTree as ET
 import numpy as np
 from PIL import Image
 
+logger = logging.getLogger(__name__)
+
 # Cap on how many images embedded inside one document get OCR'd. Real
 # documents can embed hundreds/thousands of images (see the OCR benchmark:
 # one real scanned PDF had 2,692 embedded images) - without a bound, a single
 # resource could make Extraction arbitrarily slow. This is a deliberate MVP
 # limit, not a general "extract everything recursively" system.
 MAX_EMBEDDED_IMAGES_PER_DOCUMENT = 20
+
+# Ceiling on the pixels of an image we will decode. A full page scanned at
+# 600 dpi is ~34.8 MP (A4) / ~33.7 MP (Letter), so 50 MP covers the heaviest
+# realistic document scan with room to spare; above that it is not a page.
+# Set here explicitly rather than relying on Pillow's own default, which only
+# *warns* up to 89.5 MP and errors above 179 MP - and which is process-global
+# state this module should not mutate.
+MAX_IMAGE_PIXELS = 50_000_000
+
+# Longest side the skew search works on. Reducing to this size before any
+# array is allocated is what keeps peak memory independent of input size.
+_SKEW_WORKING_PIXELS = 500
+
+# Office formats (DOCX/PPTX/XLSX/ODT/ODS) are zip containers, so extracting
+# any of them means decompressing zip members. These bound one member, the
+# running total per document, and how far a member may expand - all three are
+# read from the zip's central directory, without decompressing anything.
+# (A .zip or .rar as course material is a different thing entirely and is
+# not a supported format at all - it is recorded as 'unsupported'.)
+MAX_ZIP_MEMBER_BYTES = 50 * 1024 * 1024
+MAX_ZIP_TOTAL_BYTES = 200 * 1024 * 1024
+MAX_ZIP_COMPRESSION_RATIO = 100
+
+
+class ImageTooLargeError(Exception):
+    """An image declares more pixels than MAX_IMAGE_PIXELS, so it is not decoded.
+
+    Raised rather than silently returning the original bytes: an image we
+    refuse to look at must become an explicit failed extraction attempt
+    (DEC-048), not a silently empty success.
+    """
+
+
+def _unsafe_zip_member(info: zipfile.ZipInfo, running_total: int) -> str | None:
+    """Why this member must not be read, or None when it may be."""
+    if info.file_size > MAX_ZIP_MEMBER_BYTES:
+        return f"{info.file_size} bytes uncompressed, over the {MAX_ZIP_MEMBER_BYTES}-byte limit"
+    if info.compress_size > 0:
+        ratio = info.file_size / info.compress_size
+        if ratio > MAX_ZIP_COMPRESSION_RATIO:
+            return f"compression ratio {ratio:.0f}:1, over {MAX_ZIP_COMPRESSION_RATIO}:1"
+    if running_total + info.file_size > MAX_ZIP_TOTAL_BYTES:
+        return f"would pass the {MAX_ZIP_TOTAL_BYTES}-byte total for one document"
+    return None
 
 
 @dataclass
@@ -92,25 +139,30 @@ def estimate_skew_angle(im: Image.Image, candidate_angles=None) -> float:
     numpy/Pillow, no OCR-specific dependency, and empirically validated in
     the OCR benchmark (single biggest lever found there: ~87-93% CER
     reduction across every engine tested).
+
+    The reduction to _SKEW_WORKING_PIXELS happens BEFORE any array is
+    allocated, because the search only ever needs the reduced copy. That
+    ordering makes peak memory independent of the input: measured at a
+    constant ~5.7 MB, instead of ~25 bytes per input pixel (~2.2 GB for an
+    image Pillow accepts with only a warning).
     """
     if candidate_angles is None:
         candidate_angles = np.arange(-30, 30.5, 0.5)
-    gray = np.array(im.convert("L"), dtype=np.float64)
-    thresh = gray.mean() - 0.15 * gray.std()
-    binary = (gray < thresh).astype(np.float64)
 
-    small = Image.fromarray((binary * 255).astype(np.uint8))
-    w, h = small.size
-    if max(w, h) > 500:
-        scale = 500 / max(w, h)
-        small = small.resize((max(1, int(w * scale)), max(1, int(h * scale))))
+    w, h = im.size
+    if max(w, h) > _SKEW_WORKING_PIXELS:
+        scale = _SKEW_WORKING_PIXELS / max(w, h)
+        im = im.resize((max(1, int(w * scale)), max(1, int(h * scale))))
+
+    gray = np.asarray(im.convert("L"), dtype=np.float32)
+    thresh = gray.mean() - 0.15 * gray.std()
+    small = Image.fromarray(((gray < thresh) * 255).astype(np.uint8))
 
     best_angle = 0.0
     best_score = -1.0
     for angle in candidate_angles:
         rotated = small.rotate(float(angle), expand=True, fillcolor=0)
-        arr = np.array(rotated, dtype=np.float64)
-        score = arr.sum(axis=1).var()
+        score = np.asarray(rotated, dtype=np.float32).sum(axis=1).var()
         if score > best_score:
             best_score = score
             best_angle = float(angle)
@@ -121,9 +173,29 @@ def deskew(image_bytes: bytes) -> bytes:
     """Best-effort deskew. Returns the original bytes unchanged if the image
     can't be decoded, or if the estimated skew is negligible (<0.25deg) -
     re-encoding a perfectly straight image would only lose quality for no
-    benefit."""
+    benefit.
+
+    Raises ImageTooLargeError for an image over MAX_IMAGE_PIXELS. The size
+    is read from the header before any pixel is decoded, and the error is
+    deliberately not swallowed: returning the original bytes would hand the
+    oversized image straight to the OCR engine, which has no such limit.
+    """
     try:
-        im = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        im = Image.open(io.BytesIO(image_bytes))
+        width, height = im.size  # header only - nothing decoded yet
+    except Image.DecompressionBombError as exc:
+        raise ImageTooLargeError(str(exc)) from None
+    except Exception:
+        return image_bytes
+
+    if width * height > MAX_IMAGE_PIXELS:
+        raise ImageTooLargeError(
+            f"{width}x{height} = {width * height} pixels, over the "
+            f"{MAX_IMAGE_PIXELS}-pixel limit"
+        )
+
+    try:
+        im = im.convert("RGB")
     except Exception:
         return image_bytes
 
@@ -152,9 +224,20 @@ def ocr_embedded_images(
     per_image: list[dict] = []
     try:
         with zipfile.ZipFile(io.BytesIO(data)) as z:
-            media = sorted(n for n in z.namelist() if n.startswith(media_prefix))
+            media = sorted(
+                (i for i in z.infolist() if i.filename.startswith(media_prefix)),
+                key=lambda i: i.filename,
+            )
             truncated = len(media) > max_images
-            for name in media[:max_images]:
+            total_bytes = 0
+            for info in media[:max_images]:
+                name = info.filename
+                unsafe = _unsafe_zip_member(info, total_bytes)
+                if unsafe is not None:
+                    logger.warning("Skipped embedded image %s: %s", name, unsafe)
+                    per_image.append({"file": name, "status": "skipped", "reason": unsafe})
+                    continue
+                total_bytes += info.file_size
                 try:
                     img_bytes = z.read(name)
                     deskewed = deskew(img_bytes)
@@ -184,14 +267,24 @@ def extract_ooxml_slide_text(data: bytes) -> tuple[str, int]:
     structure, which is identical between the two formats.
     """
     with zipfile.ZipFile(io.BytesIO(data)) as z:
-        slide_names = sorted(
-            n for n in z.namelist() if n.startswith("ppt/slides/slide") and n.endswith(".xml")
+        slides = sorted(
+            (
+                i for i in z.infolist()
+                if i.filename.startswith("ppt/slides/slide") and i.filename.endswith(".xml")
+            ),
+            key=lambda i: i.filename,
         )
         parts = []
-        for name in slide_names:
+        total_bytes = 0
+        for info in slides:
+            unsafe = _unsafe_zip_member(info, total_bytes)
+            if unsafe is not None:
+                logger.warning("Skipped slide %s: %s", info.filename, unsafe)
+                continue
+            total_bytes += info.file_size
             try:
-                root = ET.fromstring(z.read(name))
+                root = ET.fromstring(z.read(info.filename))
                 parts.append("".join(root.itertext()))
             except ET.ParseError:
                 continue
-        return "\n".join(parts), len(slide_names)
+        return "\n".join(parts), len(slides)

@@ -26,6 +26,24 @@ class MoodleAuthenticationError(MoodleAPIError):
     """The token was rejected by Moodle (invalid, expired, or missing)."""
 
 
+class MoodleResourceTooLargeError(MoodleError):
+    """A file is larger than the per-download limit, so it was never read.
+
+    Carries the size seen and the limit in force so the caller can record
+    both: the limit may be retuned later, and stored history has to stay
+    interpretable when it is. Neither the URL nor the filename is included -
+    this message reaches logs and execution history.
+    """
+
+    def __init__(self, size_bytes: int | None, limit_bytes: int) -> None:
+        self.size_bytes = size_bytes
+        self.limit_bytes = limit_bytes
+        seen = f"{size_bytes} bytes" if size_bytes is not None else "an undeclared size"
+        super().__init__(
+            f"Refusing to download a Moodle file of {seen}: over the {limit_bytes}-byte limit"
+        )
+
+
 class MoodleUntrustedURLError(MoodleError):
     """A file URL does not belong to the configured Moodle host.
 

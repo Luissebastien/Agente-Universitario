@@ -2,10 +2,57 @@ from __future__ import annotations
 
 import abc
 import io
+import logging
+import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 
 from extraction.ocr import OcrEngine, deskew, extract_ooxml_slide_text, ocr_embedded_images
+
+logger = logging.getLogger(__name__)
+
+# Resolution the OCR benchmark was run at. The effective scale is reduced for
+# an unusually large page - see _render_scale.
+OCR_RENDER_DPI = 200
+
+# Ceiling on the pixels of one rendered PDF page. A page's size comes from its
+# own MediaBox, not from us: a letter page is 2.9 MP at 200 dpi, but the
+# largest MediaBox the format allows (200x200 in) is 1,600 MP - 4.8 GB for a
+# single page's RGB bitmap. Above this limit the page is rendered at a lower
+# resolution instead of failing, so the document still gets processed
+# (DEC-048 prefers degrading to refusing).
+MAX_RENDER_PIXELS = 50_000_000
+
+# How often a long OCR run reports progress, so "slow" is distinguishable
+# from "stuck". There is deliberately no page or time cap: a scanned book is
+# legitimate material and must be allowed to finish.
+OCR_PROGRESS_EVERY_PAGES = 25
+
+
+def _never_stop() -> bool:
+    return False
+
+
+class ExtractionInterrupted(Exception):
+    """A stop was requested part-way through a long extraction.
+
+    Carries no partial result on purpose. Extraction records nothing for the
+    version, which therefore stays pending and is retried intact: a partial
+    text stored as 'done' would be silently truncated forever, and a 'failed'
+    row would count against the bounded retry, so three shutdowns during the
+    same book would abandon it.
+    """
+
+
+def _render_scale(width_pt: float, height_pt: float) -> float:
+    """Render scale for one page: OCR_RENDER_DPI, reduced if the page is big
+    enough that the bitmap would pass MAX_RENDER_PIXELS."""
+    base = OCR_RENDER_DPI / 72
+    pixels = (width_pt * base) * (height_pt * base)
+    if pixels <= MAX_RENDER_PIXELS or pixels <= 0:
+        return base
+    return base * math.sqrt(MAX_RENDER_PIXELS / pixels)
 
 _PLAIN_TEXT_MIMETYPES = {"text/plain", "text/uri-list"}
 _PLAIN_TEXT_EXTENSIONS = {".txt"}
@@ -36,6 +83,10 @@ class Extractor(abc.ABC):
 
     name: str
     version: str
+    # True when extract() accepts a should_stop callback because its work is
+    # unbounded (today: only the per-page OCR loop of a PDF). Everything else
+    # is bounded by construction and is called without one.
+    interruptible: bool = False
 
     @abc.abstractmethod
     def supports(self, mimetype: str | None, extension: str) -> bool: ...
@@ -156,6 +207,7 @@ class PdfExtractor(Extractor):
 
     name = "pdf_hybrid"
     version = "1"
+    interruptible = True
 
     def __init__(self, ocr_engine: OcrEngine | None = None) -> None:
         self._ocr_engine = ocr_engine
@@ -163,7 +215,9 @@ class PdfExtractor(Extractor):
     def supports(self, mimetype: str | None, extension: str) -> bool:
         return mimetype == "application/pdf" or extension == ".pdf"
 
-    def extract(self, data: bytes) -> ExtractionResult:
+    def extract(
+        self, data: bytes, should_stop: Callable[[], bool] = _never_stop
+    ) -> ExtractionResult:
         import pypdf
 
         reader = pypdf.PdfReader(io.BytesIO(data))
@@ -191,13 +245,24 @@ class PdfExtractor(Extractor):
         pdf = pdfium.PdfDocument(data)
         try:
             ocr_texts = []
-            for page in pdf:
-                bitmap = page.render(scale=200 / 72)  # ~200 DPI, matches the OCR benchmark
+            reduced_pages = 0
+            for index, page in enumerate(pdf, start=1):
+                if should_stop():
+                    raise ExtractionInterrupted(
+                        f"stopped during OCR at page {index} of {n_pages}"
+                    )
+                width_pt, height_pt = page.get_size()
+                scale = _render_scale(width_pt, height_pt)
+                if scale < OCR_RENDER_DPI / 72:
+                    reduced_pages += 1
+                bitmap = page.render(scale=scale)
                 pil_image = bitmap.to_pil()
                 buf = io.BytesIO()
                 pil_image.save(buf, format="PNG")
                 deskewed = deskew(buf.getvalue())
                 ocr_texts.append(self._ocr_engine.ocr(deskewed).text)
+                if index % OCR_PROGRESS_EVERY_PAGES == 0:
+                    logger.info("OCR progress: page %d/%d", index, n_pages)
         finally:
             pdf.close()
 
@@ -208,6 +273,7 @@ class PdfExtractor(Extractor):
                 "sufficient_text": False, "scanned": True, "ocr_available": True,
                 "ocr_engine": self._ocr_engine.name, "ocr_engine_version": self._ocr_engine.version,
                 "preprocessing": "deskew",
+                "pages_rendered_below_target_dpi": reduced_pages,
             },
         )
 

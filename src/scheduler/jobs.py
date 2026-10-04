@@ -145,6 +145,10 @@ class IngestionJob(Job):
             f"{result.attempted}/{result.pending} attempted, {result.new_versions} new version(s), "
             f"{result.failed} failed, {result.remaining} still pending"
         )
+        if result.deferred:
+            # Kept in execution history so a skipped file is never invisible;
+            # `--status` lists them with their sizes.
+            detail += f", {result.deferred} deferred (too large)"
         error = f"{result.failed} item(s) failed; first: {result.first_error}" if result.failed else None
         return JobResult(result.attempted, detail, error)
 

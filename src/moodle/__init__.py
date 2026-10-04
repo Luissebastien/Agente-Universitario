@@ -5,6 +5,7 @@ from moodle.exceptions import (
     MoodleConnectionError,
     MoodleError,
     MoodleHTTPError,
+    MoodleResourceTooLargeError,
     MoodleUntrustedURLError,
 )
 from moodle.models import (
@@ -28,6 +29,7 @@ __all__ = [
     "MoodleHTTPError",
     "MoodleAPIError",
     "MoodleAuthenticationError",
+    "MoodleResourceTooLargeError",
     "MoodleUntrustedURLError",
     "MoodleSync",
     "MoodleUser",
