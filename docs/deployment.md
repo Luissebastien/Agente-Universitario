@@ -208,48 +208,16 @@ integración, que requieren credenciales).
 
 ## 8. Operación
 
-```sh
-# Estado, historial y archivos aplazados
-sudo -u agente-u /opt/agente-u/.venv/bin/python -m scheduler \
-     --config /etc/agente-u/scheduler.toml --status
+Los comandos del día a día — estado, logs, forzar un job, consultar la base
+de datos, copias, diagnóstico — están en **[operations.md](operations.md)**.
 
-# Forzar un job ahora (se encola si el scheduler está ocupado)
-sudo -u agente-u /opt/agente-u/.venv/bin/python -m scheduler \
-     --config /etc/agente-u/scheduler.toml --job moodle_sync
-
-# Logs
-journalctl -u agente-u -S today
-journalctl -u agente-u-backup -S '1 week ago'
-```
-
-### Reajustar el límite de descarga
-
-Un archivo por encima del límite (64 MB) no se descarga: se registra y se
-deja a la espera de una decisión, **sin reintentarlo cada ciclo**. `--status`
-los lista de mayor a menor, con el tamaño que se vio y el límite que estaba
-vigente:
-
-```
-Not ingested (1 resource(s) waiting for a decision):
-  [oversized] video-clase-3.mp4 - 295.6 MB (limit in force: 64 MB) course=101 since ...
-```
-
-Si decides subir el límite, cambia `MAX_RESOURCE_BYTES` en
-`src/moodle/client.py`, reinicia el servicio y el archivo se reevalúa en el
-siguiente ciclo (si el profesor lo reemplaza, también se reevalúa solo).
-
-### Restaurar una copia
+Lo mínimo para comprobar que sigue vivo:
 
 ```sh
-sudo systemctl stop agente-u
-sudo -u agente-u sh -c 'gunzip -c /var/backups/agente-u/agente_u-<fecha>.sqlite3.gz \
-    > /var/lib/agente-u/agente_u.sqlite3'
-sudo systemctl start agente-u
+sudo systemctl status agente-u --no-pager
+sudo -u agente-u /opt/agente-u/.venv/bin/python -m scheduler      --config /etc/agente-u/scheduler.toml --status
+sudo journalctl -u agente-u -S today
 ```
-
-Los **originales descargados no se respaldan**: son copias direccionadas por
-contenido de archivos que Moodle sigue teniendo, y recuperarlos cuesta una
-sincronización. La base de datos es lo único que no se puede reconstruir.
 
 ---
 

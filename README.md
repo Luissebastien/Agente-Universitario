@@ -80,7 +80,8 @@ Agente-Universitario/
 ├── deploy/              # Artefactos de despliegue (systemd, backup, config de VPS)
 │
 ├── docs/                # Documentación pública del proyecto
-│   └── deployment.md    # Guía de despliegue en VPS
+│   ├── deployment.md    # Guía de despliegue en VPS
+│   └── operations.md    # Comandos de operación del día a día
 │
 ├── src/
 │   ├── agent/           # Lógica del agente
