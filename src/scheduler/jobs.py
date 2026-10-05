@@ -164,8 +164,8 @@ class ExtractionJob(Job):
         self._extraction: Extraction | None = None
 
     def _get_extraction(self) -> Extraction:
-        # Built once so the OCR engine (and its model, loaded lazily on first
-        # OCR) is reused across runs instead of reloaded every cycle.
+        # Cheap to build: the OCR model is loaded lazily, on the first page
+        # that actually needs it, not here.
         if self._extraction is None:
             self._extraction = self._extraction_factory()
         return self._extraction
@@ -174,12 +174,22 @@ class ExtractionJob(Job):
         return bool(self._get_extraction().pending_version_ids(EXTRACTION_DEPTH))
 
     def run(self, context: RunContext) -> JobResult:
-        result = self._get_extraction().extract_pending(
-            EXTRACTION_DEPTH,
-            max_items=self._budget.max_items,
-            max_seconds=self._budget.max_seconds,
-            should_stop=context.should_stop,
-        )
+        try:
+            result = self._get_extraction().extract_pending(
+                EXTRACTION_DEPTH,
+                max_items=self._budget.max_items,
+                max_seconds=self._budget.max_seconds,
+                should_stop=context.should_stop,
+            )
+        finally:
+            # Released after the run, never during it. Measured on the target
+            # host: a loaded docTR model holds ~1.1 GB resident, and the
+            # scheduler is idle between 6-hourly cycles - so keeping it would
+            # pin more than half of a 2 GiB machine's RAM to save the 12.6 s
+            # it takes to rebuild from the on-disk cache. The reload only
+            # happens in cycles that actually hit OCR, which is rare: ~97% of
+            # real PDFs carry a usable text layer (DEC-055).
+            self._extraction = None
         detail = (
             f"{result.attempted}/{result.pending} attempted, {result.done} done, "
             f"{result.failed} failed, {result.remaining} still pending"

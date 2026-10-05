@@ -72,6 +72,60 @@ class MoodleSyncJobCheckpointTests(unittest.TestCase):
         self.assertEqual(self.run_job(TRIGGER_MANUAL), expected)
 
 
+class ExtractionJobModelLifetimeTests(unittest.TestCase):
+    """The OCR model is released between runs, not held for the process
+    lifetime: it holds ~1.1 GB resident, and the scheduler is idle between
+    6-hourly cycles."""
+
+    def budget(self):
+        from scheduler.config import BudgetConfig
+        return BudgetConfig(enabled=True, max_items=10, max_seconds=999)
+
+    def job_with_counting_factory(self):
+        from scheduler.jobs import ExtractionJob
+        builds = []
+
+        def factory():
+            builds.append(1)
+            extraction = MagicMock()
+            extraction.pending_version_ids.return_value = []
+            extraction.extract_pending.return_value = MagicMock(
+                attempted=0, pending=0, done=0, failed=0, remaining=0, first_error=None)
+            return extraction
+
+        return ExtractionJob(factory, self.budget()), builds
+
+    def test_each_run_builds_a_fresh_extraction(self) -> None:
+        job, builds = self.job_with_counting_factory()
+
+        job.run(RunContext(TRIGGER_INTERVAL, lambda: False))
+        job.run(RunContext(TRIGGER_INTERVAL, lambda: False))
+
+        self.assertEqual(len(builds), 2)  # released after the first run
+
+    def test_the_model_is_released_even_when_the_run_fails(self) -> None:
+        """A failed extraction must not leave 1.1 GB pinned until restart."""
+        from scheduler.jobs import ExtractionJob
+
+        extraction = MagicMock()
+        extraction.extract_pending.side_effect = RuntimeError("boom")
+        job = ExtractionJob(lambda: extraction, self.budget())
+
+        with self.assertRaises(RuntimeError):
+            job.run(RunContext(TRIGGER_INTERVAL, lambda: False))
+
+        self.assertIsNone(job._extraction)
+
+    def test_has_work_does_not_keep_the_instance_alive_across_runs(self) -> None:
+        job, builds = self.job_with_counting_factory()
+
+        job.has_work()
+        job.run(RunContext(TRIGGER_INTERVAL, lambda: False))
+        job.has_work()
+
+        self.assertEqual(len(builds), 2)  # one before the run, one after it
+
+
 class EndToEndWiringTests(unittest.TestCase):
     """Startup cycle through the real Jobs and services, fake Moodle only."""
 

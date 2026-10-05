@@ -25,9 +25,14 @@ Ubuntu 24.04 trae Python 3.12 por defecto, así que no hace falta añadir reposi
 
 ```sh
 sudo apt update
-sudo apt install -y python3.12 python3.12-venv python3-pip sqlite3 git \
+sudo apt install -y python3 python3-venv python3-pip sqlite3 git \
                     libgl1 libglib2.0-0
 ```
+
+En Ubuntu 26.04 el metapaquete `python3-venv` puede no arrastrar `ensurepip`.
+Si `python3 -m venv` falla con *"ensurepip is not available"*, instala el de la
+versión concreta (`python3.14-venv` en 26.04). Ojo: comprobar `python3 -m venv
+--help` **no** detecta este caso; `python3 -c "import ensurepip"` sí.
 
 `libgl1` y `libglib2.0-0` no son opcionales: docTR exige `opencv-python`
 (no la variante *headless*), que enlaza `libGL.so.1`. Sin ellos `import cv2`
@@ -63,10 +68,32 @@ en reposo: la aplicación no fija permisos por su cuenta.
 ```sh
 sudo git clone https://github.com/Luissebastien/Agente-Universitario.git /opt/agente-u
 cd /opt/agente-u
-sudo python3.12 -m venv .venv
+sudo python3 -m venv .venv
 sudo .venv/bin/python -m pip install --upgrade 'pip>=26.2'   # ver §9
-sudo .venv/bin/python -m pip install -c constraints.txt -e .
+
+# 1) torch y torchvision desde el índice CPU de PyTorch - ver aviso abajo
+sudo env TMPDIR=/var/tmp .venv/bin/python -m pip install --no-cache-dir \
+    --index-url https://download.pytorch.org/whl/cpu \
+    "torch==2.14.1" "torchvision==0.29.1"
+
+# 2) el resto, desde PyPI con las versiones fijadas
+sudo env TMPDIR=/var/tmp .venv/bin/python -m pip install --no-cache-dir \
+    -c constraints.txt -e .
 ```
+
+**Los dos pasos no son opcionales en Linux.** El wheel de `torch` publicado en
+PyPI para Linux declara dependencias de CUDA (`nvidia-cudnn` son 651 MB por sí
+solo, y el conjunto pasa de 4 GB) aunque la máquina no tenga GPU. En Windows el
+wheel por defecto ya es CPU-only, así que el problema solo aparece al desplegar.
+Instalando torch primero desde el índice CPU, el segundo paso ve
+`torch<3.0.0,>=2.0.0` ya satisfecho y nunca lo busca en PyPI.
+
+`torch==2.14.1` de `constraints.txt` acepta `2.14.1+cpu`: según PEP 440, un
+especificador sin etiqueta local ignora la etiqueta local del candidato.
+
+`TMPDIR=/var/tmp` hace falta porque en Ubuntu moderno `/tmp` es un tmpfs
+respaldado por RAM (918 MB en una máquina de 2 GiB) y la descarga no cabe.
+`sudo` no propaga variables de entorno, de ahí el `env`.
 
 `constraints.txt` fija el conjunto exacto de versiones con el que pasa la
 suite de pruebas. Sin él, `pip install -e .` resolvería lo más nuevo que
@@ -174,7 +201,7 @@ Y la suite completa, que valida la portabilidad de todo el código propio:
 cd /opt/agente-u && sudo -u agente-u .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-Esperado: **416 tests, 0 fallos, 11 omitidos** (los omitidos son los de
+Esperado: **426 tests, 0 fallos, 11 omitidos** (los omitidos son los de
 integración, que requieren credenciales).
 
 ---
@@ -226,7 +253,53 @@ sincronización. La base de datos es lo único que no se puede reconstruir.
 
 ---
 
-## 9. Mantenimiento
+## 9. Actualizar
+
+Un solo comando. Para el servicio, avanza a la revisión publicada, reinstala
+solo lo que cambió, corre los 426 tests en la propia VPS y vuelve a arrancar:
+
+```sh
+sudo /opt/agente-u/deploy/update.sh
+```
+
+Detecta por sí mismo qué hace falta según los archivos que cambiaron:
+dependencias si se tocó `pyproject.toml` o `constraints.txt`, la
+configuración si cambió `deploy/scheduler.toml`, y las unidades si cambió
+alguna de `deploy/*.service` o `.timer`.
+
+**Si los tests fallan, deja el servicio parado a propósito** e imprime el
+comando exacto de vuelta atrás. Arrancar código que falla sus propias pruebas
+sería peor que un scheduler inactivo un rato: corre cada 6 horas y nunca
+repone ciclos perdidos, así que estar parado no cuesta nada, mientras que un
+ciclo defectuoso escribe en la base de datos.
+
+Código Python a secas no necesita reinstalar nada, porque la instalación es
+editable (`pip install -e .`): el venv apunta a `/opt/agente-u/src`, así que
+el `git merge` ya deja el código nuevo en su sitio y basta con reiniciar.
+
+### El hueco que debes conocer
+
+Una **tabla nueva** en `db.py` aparece sola, porque el esquema usa
+`CREATE TABLE IF NOT EXISTS` y se ejecuta en cada conexión. Una **columna
+nueva en una tabla existente, no**: el proyecto no tiene mecanismo de
+migraciones. Por eso los aplazamientos de ingesta se guardan en una tabla
+propia (`ingestion_deferrals`) en lugar de añadir columnas a
+`ingestion_source_checks`.
+
+### Volver atrás
+
+```sh
+cd /opt/agente-u && git log --oneline -5
+sudo systemctl stop agente-u && sudo git checkout <commit> && sudo systemctl start agente-u
+```
+
+Revertir código es seguro porque la base de datos solo crece: las filas son
+de solo-añadir y el esquema solo suma tablas, así que una versión anterior
+ignora lo que no conoce en lugar de romperse.
+
+---
+
+## 10. Mantenimiento
 
 | Tarea | Frecuencia | Nota |
 |---|---|---|
@@ -237,7 +310,7 @@ sincronización. La base de datos es lo único que no se puede reconstruir.
 
 ---
 
-## 10. Límites y decisiones vigentes
+## 11. Límites y decisiones vigentes
 
 Valores derivados del corpus real de la instancia real (199 archivos: mediana 0.09 MB,
 p99 11.42 MB, mayor 34.24 MB; documento más pesado un libro de 786 páginas de
@@ -252,7 +325,7 @@ p99 11.42 MB, mayor 34.24 MB; documento más pesado un libro de 786 páginas de
 | Imágenes incrustadas por documento | 20 | `src/extraction/ocr.py` |
 | Reserva de disco | 256 MB | `src/ingestion/storage.py` |
 | Intentos por job | 3 | `src/scheduler/scheduler.py` |
-| Memoria del proceso | 4 GB (tope de systemd) | `deploy/agente-u.service` |
+| Memoria del proceso | 1.5 GB (tope de systemd, para 2 GiB de RAM) | `deploy/agente-u.service` |
 
 **No hay límite de páginas ni de tiempo por documento**, a propósito: un libro
 escaneado es material legítimo y debe poder terminar. Un apagado ordenado se

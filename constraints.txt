@@ -9,7 +9,7 @@
 #
 # Generado: 2026-10-04
 # Validado con: Python 3.14.4, 51 distribuciones,
-#               423 tests OK / 11 omitidos.
+#               426 tests OK / 11 omitidos.
 #
 # Todas estas versiones tienen wheel manylinux aarch64 para CPython 3.12
 # (comprobado contra la API de PyPI), que es el objetivo de despliegue.

@@ -54,13 +54,21 @@ UMask=0077
 
 ; ---- resource ceiling ---------------------------------------------------
 ; Per-item limits live in the code (download size, image pixels, rendered
-; pixels per page, zip members). This is only the backstop: measured worst
-; case per document is ~1.3 GB, so 4 GB leaves wide margin on a 12 GB box
-; while still protecting the machine.
-MemoryHigh=3G
-MemoryMax=4G
-; A long OCR is CPU-bound by design; cap it so the box stays responsive.
-CPUQuota=180%
+; pixels per page, zip members). This is only the backstop, sized for a
+; 2 GiB host (AWS t4g.small): measured worst case per document is ~1.3 GB,
+; of which ~1 GB is the resident OCR model.
+; The OCR model is released after each extraction run (see ExtractionJob),
+; so this is a peak-of-the-moment ceiling, not a steady-state one: the
+; daemon idles at ~150 MB and only approaches these figures while a cycle
+; is actually doing OCR.
+; Under cgroup v2 these push the process into swap rather than killing it,
+; so the ceiling protects the OS without aborting a long extraction.
+; On a larger host, raise both to roughly 70% / 85% of RAM.
+MemoryHigh=1400M
+MemoryMax=1700M
+; 2 burstable vCPUs: leave headroom for the OS and the SSM agent, and avoid
+; pegging both cores (which burns CPU credits fastest).
+CPUQuota=150%
 
 ; ---- hardening ----------------------------------------------------------
 NoNewPrivileges=yes
@@ -78,6 +86,11 @@ RestrictSUIDSGID=yes
 LockPersonality=yes
 ; Outbound TCP/IP only. No inbound socket is ever opened.
 RestrictAddressFamilies=AF_INET AF_INET6
+; The process has no legitimate reason to reach link-local addresses. On a
+; cloud host that range serves instance metadata (169.254.169.254), which is
+; where an SSRF would go looking for credentials. The Moodle client already
+; rejects any host but the configured one; this is the second lock.
+IPAddressDeny=169.254.0.0/16
 CapabilityBoundingSet=
 AmbientCapabilities=
 SystemCallFilter=@system-service
