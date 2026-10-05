@@ -75,7 +75,12 @@ Agente-Universitario/
 │
 ├── .ai/                 # Contexto privado para el desarrollo con IA
 │
+├── config/              # Configuración del Scheduler (sin secretos)
+│
+├── deploy/              # Artefactos de despliegue (systemd, backup, config de VPS)
+│
 ├── docs/                # Documentación pública del proyecto
+│   └── deployment.md    # Guía de despliegue en VPS
 │
 ├── src/
 │   ├── agent/           # Lógica del agente
@@ -92,6 +97,7 @@ Agente-Universitario/
 │   └── sentinel/        # Pruebas enfocadas en confiabilidad
 │
 ├── .env.example         # Ejemplo de configuración del entorno
+├── constraints.txt      # Versiones exactas con las que pasa la suite de pruebas
 ├── .gitignore
 └── README.md
 ```

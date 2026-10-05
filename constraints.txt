@@ -1,0 +1,72 @@
+# Agente U - versiones exactas con las que pasa la suite de pruebas.
+#
+# Uso:  pip install -c constraints.txt -e .
+#
+# Un archivo de restricciones fija QUE version se instala, no QUE paquetes se
+# instalan: las dependencias las sigue declarando pyproject.toml. Sin esto,
+# `pip install -e .` resuelve lo mas nuevo que exista ese dia, que no es
+# necesariamente lo que se valido.
+#
+# Generado: 2026-10-04
+# Validado con: Python 3.14.4, 51 distribuciones,
+#               423 tests OK / 11 omitidos.
+#
+# Todas estas versiones tienen wheel manylinux aarch64 para CPython 3.12
+# (comprobado contra la API de PyPI), que es el objetivo de despliegue.
+#
+# Bloqueadas a proposito por nuestras propias dependencias:
+#   huggingface-hub  -> docTR declara  huggingface-hub<2.0.0  (hay 2.1.1)
+#   mpmath           -> sympy declara  mpmath<1.4             (hay 1.4.1)
+# Para regenerar: actualizar, correr la suite y volver a generar este archivo.
+
+anyascii==0.3.3
+anyio==4.15.1
+certifi==2026.7.22
+click==8.5.0
+colorama==0.4.6; platform_system == "Windows"
+defusedxml==0.7.1
+et_xmlfile==2.0.0
+filelock==4.0.10
+fsspec==2026.9.0
+h11==0.16.0
+h5py==3.16.0
+hf-xet==1.6.0
+httpcore==1.0.9
+httpx==0.28.1
+huggingface_hub==1.32.0
+idna==3.20
+Jinja2==3.1.6
+langdetect==1.0.9
+lxml==6.1.3
+MarkupSafe==3.0.4
+ml_dtypes==0.6.0
+mpmath==1.3.0
+networkx==3.7
+numpy==2.5.3
+odfpy==1.4.1
+onnx==1.23.1
+opencv-python==5.0.0.93
+openpyxl==3.1.5
+packaging==26.3
+pillow==12.3.0
+protobuf==7.36.2
+pyclipper==1.4.0
+pypdf==6.19.0
+pypdfium2==5.13.0
+python-doctr==1.1.0
+python-docx==1.2.0
+python-pptx==1.0.2
+PyYAML==6.0.3
+RapidFuzz==3.14.6
+scipy==1.18.1
+shapely==2.1.2
+six==1.17.0
+sympy==1.14.0
+torch==2.14.1
+torchvision==0.29.1
+tqdm==4.70.1
+typing_extensions==4.16.0
+tzdata==2026.5
+validators==0.35.0
+xlrd==2.0.2
+xlsxwriter==3.2.9

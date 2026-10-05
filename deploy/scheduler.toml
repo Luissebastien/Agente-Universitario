@@ -1,0 +1,37 @@
+# Agente U - Scheduler configuration for a Linux VPS.
+#
+# Install to /etc/agente-u/scheduler.toml. This is the VPS variant of
+# config/scheduler.toml: same keys, but absolute FHS paths instead of the
+# repository-relative defaults used for local development.
+#
+# Secrets are NEVER configured here. MOODLE_URL and MOODLE_TOKEN come from
+# the environment only (EnvironmentFile in agente-u.service).
+
+[scheduler]
+timezone = "America/Santo_Domingo"
+# Inside StateDirectory=agente-u, created 0700 and owned by the service user.
+database_path = "/var/lib/agente-u/agente_u.sqlite3"
+storage_path = "/var/lib/agente-u/originals"
+retry_delay_seconds = 60
+allow_manual_disabled_jobs = false
+
+[moodle_sync]
+enabled = true
+interval_hours = 6
+
+[ingestion]
+enabled = true
+max_items = 100
+max_seconds = 1800
+
+[extraction]
+enabled = true
+max_items = 50
+max_seconds = 1800
+# Raise max_seconds temporarily while working through the backlog at the
+# start of a term; it is only checked between documents, so a long one is
+# never cut off mid-way.
+
+[notifications]
+enabled = true
+due_soon_hours = 24

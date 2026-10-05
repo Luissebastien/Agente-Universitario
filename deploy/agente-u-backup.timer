@@ -1,0 +1,12 @@
+; Daily database backup, after the usual overnight sync window.
+[Unit]
+Description=Daily Agente U database backup
+
+[Timer]
+OnCalendar=*-*-* 04:30:00
+; The VM may be stopped at 04:30; run the missed backup once it is back.
+Persistent=true
+RandomizedDelaySec=15m
+
+[Install]
+WantedBy=timers.target

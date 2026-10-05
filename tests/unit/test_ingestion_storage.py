@@ -63,3 +63,35 @@ class FilesystemStorageTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DiskSpaceGuardTests(unittest.TestCase):
+    """A nearly full filesystem must be refused explicitly, before the write."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name) / "originals"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_store_is_refused_when_it_would_eat_the_reserve(self) -> None:
+        storage = FilesystemStorage(self.root, min_free_bytes=2**60)  # larger than any disk
+
+        with self.assertRaises(StorageError) as caught:
+            storage.store(b"content", "a" * 64)
+
+        self.assertIn("reserve", str(caught.exception))
+        self.assertEqual(list(self.root.iterdir()), [])  # nothing written, no temp left
+
+    def test_store_proceeds_with_room_to_spare(self) -> None:
+        storage = FilesystemStorage(self.root, min_free_bytes=0)
+
+        self.assertEqual(storage.store(b"content", "b" * 64), "b" * 64)
+
+    def test_already_stored_content_is_a_no_op_even_without_room(self) -> None:
+        """Deduplication must not be blocked by the guard: nothing is written."""
+        FilesystemStorage(self.root, min_free_bytes=0).store(b"content", "c" * 64)
+        tight = FilesystemStorage(self.root, min_free_bytes=2**60)
+
+        self.assertEqual(tight.store(b"content", "c" * 64), "c" * 64)

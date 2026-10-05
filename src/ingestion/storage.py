@@ -3,8 +3,15 @@ from __future__ import annotations
 import abc
 import contextlib
 import os
+import shutil
 import tempfile
 from pathlib import Path
+
+# Headroom kept free on the storage filesystem. The database lives beside the
+# originals and needs room for its rollback journal to commit; running the
+# partition to zero would turn an ingestion problem into a database one.
+# Negligible on the 47-200 GB the target VPS provides.
+MIN_FREE_BYTES = 256 * 1024 * 1024
 
 
 class StorageError(Exception):
@@ -64,8 +71,9 @@ class FilesystemStorage(Storage):
     to the same file) without needing a lookup.
     """
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(self, root: str | Path, min_free_bytes: int = MIN_FREE_BYTES) -> None:
         self._root = Path(root)
+        self._min_free_bytes = min_free_bytes
         self._root.mkdir(parents=True, exist_ok=True)
 
     def _path_for(self, storage_ref: str) -> Path:
@@ -75,11 +83,31 @@ class FilesystemStorage(Storage):
             raise StorageError(f"Invalid storage_ref: {storage_ref!r}")
         return self._root / storage_ref
 
+    def _assert_space_for(self, size: int) -> None:
+        """Refuse before writing when the filesystem is nearly full.
+
+        Running out of space mid-write already degrades safely (the temp file
+        is removed and the resource stays pending), but it does so after
+        doing all the work and with an opaque OSError. Checking first makes
+        the reason explicit, as DEC-048 requires, and preserves the headroom
+        the database needs to commit.
+        """
+        try:
+            free = shutil.disk_usage(self._root).free
+        except OSError:
+            return  # cannot determine free space: never block on a diagnostic
+        if free - size < self._min_free_bytes:
+            raise StorageError(
+                f"Refusing to store {size} bytes: {free} bytes free, which would "
+                f"leave less than the {self._min_free_bytes}-byte reserve"
+            )
+
     def store(self, data: bytes, content_hash: str) -> str:
         target = self._path_for(content_hash)
         if target.exists():
             return content_hash  # identical content already stored - no-op
 
+        self._assert_space_for(len(data))
         fd, tmp_path = tempfile.mkstemp(dir=self._root, prefix=".tmp-")
         try:
             with os.fdopen(fd, "wb") as f:

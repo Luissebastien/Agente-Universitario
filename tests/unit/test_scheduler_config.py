@@ -1,5 +1,6 @@
 import os
 import tempfile
+import tomllib
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -130,6 +131,52 @@ class RedactionTests(unittest.TestCase):
         text = safe_error(RuntimeError("x" * 5000))
         self.assertLessEqual(len(text), 1000)
         self.assertTrue(text.startswith("RuntimeError: "))
+
+
+class ShippedConfigFilesTests(unittest.TestCase):
+    """The repository ships two configurations: config/scheduler.toml for local
+    development and deploy/scheduler.toml for the VPS (absolute FHS paths).
+    They must stay structurally identical, or one of them silently rots."""
+
+    ROOT = Path(__file__).resolve().parents[2]
+
+    def load(self, relative: str):
+        path = self.ROOT / relative
+        self.assertTrue(path.is_file(), f"missing {relative}")
+        return tomllib.loads(path.read_text(encoding="utf-8"))
+
+    def test_both_shipped_configs_are_accepted_by_the_loader(self) -> None:
+        for relative in ("config/scheduler.toml", "deploy/scheduler.toml"):
+            with self.subTest(config=relative):
+                load_config(self.ROOT / relative)  # raises ConfigError if invalid
+
+    def test_the_two_configs_declare_exactly_the_same_keys(self) -> None:
+        local = self.load("config/scheduler.toml")
+        vps = self.load("deploy/scheduler.toml")
+
+        self.assertEqual(sorted(local), sorted(vps))
+        for section in local:
+            with self.subTest(section=section):
+                self.assertEqual(sorted(local[section]), sorted(vps[section]))
+
+    def test_the_vps_config_uses_absolute_paths_outside_the_repository(self) -> None:
+        """The whole point of the VPS variant: private data must not land in a
+        repository-relative (and, on the dev machine, cloud-synced) folder."""
+        vps = self.load("deploy/scheduler.toml")["scheduler"]
+
+        for key in ("database_path", "storage_path"):
+            with self.subTest(key=key):
+                value = vps[key]
+                self.assertTrue(value.startswith("/"), value)
+                self.assertNotIn("..", value)
+
+    def test_neither_shipped_config_contains_a_secret_key(self) -> None:
+        for relative in ("config/scheduler.toml", "deploy/scheduler.toml"):
+            text = (self.ROOT / relative).read_text(encoding="utf-8").lower()
+            with self.subTest(config=relative):
+                for forbidden in ("moodle_token", "wstoken", "api_key", "password"):
+                    self.assertNotIn(f"{forbidden} =", text)
+                    self.assertNotIn(f"{forbidden}=", text)
 
 
 if __name__ == "__main__":

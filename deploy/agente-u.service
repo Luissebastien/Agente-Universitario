@@ -1,0 +1,89 @@
+; Agente U scheduler - systemd unit for a single-tenant Linux VPS.
+;
+; systemd is used ONLY to start, supervise and restart the process. It makes
+; no scheduling decision: the 6-hour interval, the startup reconciling sync,
+; the dependency chain and the retries all stay inside the process, which is
+; what .ai/SCHEDULER-MVP-RULES.md requires (no external scheduler).
+;
+; Install: see docs/deployment.md. Paths assume
+;   /opt/agente-u        code + virtualenv (read-only to the service)
+;   /etc/agente-u        scheduler.toml + env file (read-only to the service)
+;   /var/lib/agente-u    database, originals, OCR model cache (read-write)
+
+[Unit]
+Description=Agente U academic scheduler
+Documentation=https://github.com/Luissebastien/Agente-Universitario
+; Only outbound HTTPS is ever needed, but DNS must resolve at startup: the
+; first thing the process does is a full Moodle sync.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=agente-u
+Group=agente-u
+WorkingDirectory=/opt/agente-u
+
+; MOODLE_URL and MOODLE_TOKEN only. Must be chmod 600, owned by root, and
+; never inside /opt/agente-u (which is a git checkout).
+EnvironmentFile=/etc/agente-u/env
+
+; Keep the docTR model weights inside the state directory instead of the
+; service user's home, so they survive and stay with the rest of the data.
+Environment=DOCTR_CACHE_DIR=/var/lib/agente-u/doctr-cache
+; 2 OCPU: let PyTorch use both, but do not let it oversubscribe them.
+Environment=OMP_NUM_THREADS=2
+Environment=PYTHONUNBUFFERED=1
+
+ExecStart=/opt/agente-u/.venv/bin/python -m scheduler --config /etc/agente-u/scheduler.toml
+
+Restart=always
+RestartSec=60
+; SIGTERM is honoured between items and, during a long OCR, between pages,
+; so a clean stop takes about one page - not one document.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+; ---- data location and permissions -------------------------------------
+; Creates/owns /var/lib/agente-u. 0700 + umask 0077 keep the academic
+; database and the downloaded originals unreadable to other local users;
+; the application itself sets no permissions of its own.
+StateDirectory=agente-u
+StateDirectoryMode=0700
+UMask=0077
+
+; ---- resource ceiling ---------------------------------------------------
+; Per-item limits live in the code (download size, image pixels, rendered
+; pixels per page, zip members). This is only the backstop: measured worst
+; case per document is ~1.3 GB, so 4 GB leaves wide margin on a 12 GB box
+; while still protecting the machine.
+MemoryHigh=3G
+MemoryMax=4G
+; A long OCR is CPU-bound by design; cap it so the box stays responsive.
+CPUQuota=180%
+
+; ---- hardening ----------------------------------------------------------
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+; Outbound TCP/IP only. No inbound socket is ever opened.
+RestrictAddressFamilies=AF_INET AF_INET6
+CapabilityBoundingSet=
+AmbientCapabilities=
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+; MemoryDenyWriteExecute is deliberately NOT set: PyTorch maps executable
+; pages and would fail to load with it enabled.
+
+[Install]
+WantedBy=multi-user.target

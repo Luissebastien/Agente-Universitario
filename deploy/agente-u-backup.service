@@ -1,0 +1,22 @@
+; One consistent database backup. Triggered by agente-u-backup.timer.
+[Unit]
+Description=Agente U database backup
+After=agente-u.service
+
+[Service]
+Type=oneshot
+User=agente-u
+Group=agente-u
+UMask=0077
+ExecStart=/opt/agente-u/deploy/backup.sh
+
+; Read-only everywhere except the state directory and the backup directory.
+StateDirectory=agente-u
+StateDirectoryMode=0700
+ReadWritePaths=/var/backups/agente-u
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=
