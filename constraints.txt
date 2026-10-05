@@ -8,7 +8,7 @@
 # necesariamente lo que se valido.
 #
 # Generado: 2026-10-04
-# Validado con: Python 3.14.4, 51 distribuciones,
+# Validado con: Python 3.14.4, 52 distribuciones,
 #               426 tests OK / 11 omitidos.
 #
 # Todas estas versiones tienen wheel manylinux aarch64 para CPython 3.12
@@ -27,6 +27,7 @@ colorama==0.4.6; platform_system == "Windows"
 defusedxml==0.7.1
 et_xmlfile==2.0.0
 filelock==4.0.10
+fonttools==4.66.1
 fsspec==2026.9.0
 h11==0.16.0
 h5py==3.16.0

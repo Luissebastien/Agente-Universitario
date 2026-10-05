@@ -10,7 +10,7 @@ requires-python = ">=3.11"
 readme = "README.md"
 dependencies = [
     # PDF: native text extraction (existing project decision).
-    "pypdf>=6.0",
+    "pypdf[fonts]>=6.0",   # fonts: fontTools, para resolver fuentes CFF/Type1 incrustadas
     # PDF: renders a page to an image for the OCR fallback path only.
     # Chosen over PyMuPDF specifically to avoid PyMuPDF's AGPL-3.0/commercial
     # dual license (flagged as a real risk in the OCR benchmark) - pypdfium2

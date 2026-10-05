@@ -209,6 +209,50 @@ sudo -u agente-u sqlite3 -column -header /var/lib/agente-u/agente_u.sqlite3 \
 
 ---
 
+## Logs
+
+journald guarda **todo el historial**, no solo lo que ves con `-f`:
+
+```sh
+sudo journalctl -u agente-u --since "2026-10-05 00:00" --until "2026-10-05 06:00"
+sudo journalctl -u agente-u -p warning -S "1 week ago"
+sudo journalctl -u agente-u --no-pager > ~/agente-u-$(date +%F).log
+sudo journalctl --disk-usage
+```
+
+Está limitado a 200 MB (`/etc/systemd/journald.conf.d/size.conf`); al llenarse
+descarta lo más antiguo.
+
+**Comprueba que sobreviva a los reinicios.** journald solo es persistente si
+existe `/var/log/journal`; si no, escribe en RAM y se pierde al reiniciar:
+
+```sh
+ls -d /var/log/journal 2>/dev/null && echo "PERSISTENTE" || echo "VOLATIL"
+```
+
+Si sale volátil, se arregla una vez:
+
+```sh
+sudo mkdir -p /var/log/journal
+sudo systemd-tmpfiles --create --prefix /var/log/journal
+sudo systemctl restart systemd-journald
+```
+
+### El segundo registro, más duradero
+
+La tabla `scheduler_executions` guarda cada intento de cada job con su
+duración, ítems y error. Frente a journald: **no rota nunca** y **entra en la
+copia de seguridad diaria**. Es append-only por diseño (DEC-038).
+
+| | journald | `scheduler_executions` |
+|---|---|---|
+| Detalle | todo, línea a línea | un registro por intento |
+| Rotación | sí, a los 200 MB | nunca |
+| Copia de seguridad | no | sí, diaria |
+| Para qué sirve | diagnóstico reciente | auditoría histórica |
+
+---
+
 ## Copias de seguridad
 
 Se hacen solas cada día a las 04:30 mediante `agente-u-backup.timer`.
@@ -249,6 +293,8 @@ sudo systemctl start agente-u
 | El proceso muere sin mensaje | `sudo dmesg \| tail` — si hay `Out of memory`, fue el OOM killer |
 | Disco lleno | `df -h /`. La aplicación reserva 256 MB y rechaza almacenar por debajo de eso con un error explícito |
 | `database is locked` | Hay otro proceso con el lock. `--status` dice si el demonio está corriendo |
+| El log se llena de avisos de `pypdf._cmap` | Falta `fontTools`. Se resuelve con la extra `pypdf[fonts]`, ya declarada en `pyproject.toml` |
+| `DependencyError` al extraer un PDF | PDF cifrado: pypdf necesitaría su extra `crypto`. Fuera del MVP; queda registrado como fallo |
 | Segunda instancia rechazada | Es correcto: solo puede haber un scheduler. Sale con código 2 |
 
 ### Comprobar el entorno sin exponer el token
