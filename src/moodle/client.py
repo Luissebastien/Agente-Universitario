@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 15.0
 # Ceiling on a single file download, which is read fully into memory (ingest()
-# needs the bytes to hash them). Measured against the real la instancia real corpus: 199
+# needs the bytes to hash them). Measured against the real corpus: 199
 # files, median 0.09 MB, p99 11.42 MB, largest 34.24 MB; the heaviest realistic
 # document - a 786-page textbook - is 5.93 MB. 64 MB is ~1.9x the largest file
 # actually seen and leaves every real one untouched, while an academic file

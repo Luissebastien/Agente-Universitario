@@ -2,7 +2,7 @@
 from consuming the whole machine, and the visibility that makes a skipped
 file reviewable instead of invisible.
 
-Thresholds were set from the real la instancia real corpus (199 files: median 0.09 MB,
+Thresholds were set from the real corpus (199 files: median 0.09 MB,
 p99 11.42 MB, largest 34.24 MB; heaviest realistic document a 786-page
 textbook at 5.93 MB), so no real file is affected by any of them.
 """

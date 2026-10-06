@@ -1,4 +1,4 @@
-"""Gated, READ-ONLY Scheduler smoke test against the real la instancia real Moodle.
+"""Gated, READ-ONLY Scheduler smoke test against the real Moodle instance.
 
 Runs one startup cycle (full sync -> ingestion -> extraction -> notifications)
 with small budgets in a temp database, then a second, incremental cycle.

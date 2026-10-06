@@ -88,7 +88,7 @@ class ExtractionSmokeTest(unittest.TestCase):
 
 def _local_fixture(kind: str) -> bytes:
     """Builds a tiny, valid document locally for formats not present in the
-    real la instancia real courses at the time this test was written (confirmed absent
+    the real courses at the time this test was written (confirmed absent
     via the extraction-strategy benchmark: PPTX, XLS, ODT, ODS). Still
     exercises the real Ingestion -> Storage -> Extraction pipeline end to
     end, just without a real Moodle download for that one format."""
@@ -138,7 +138,7 @@ def _local_fixture(kind: str) -> bytes:
 )
 class ExtractionMultiFormatPipelineTest(unittest.TestCase):
     """Validates Moodle -> Ingestion -> Storage -> Extraction -> extracted_documents
-    across every MVP format, using real la instancia real resources where they exist and
+    across every MVP format, using the real resources where they exist and
     a local fixture (routed through the same real pipeline) where they don't.
     """
 
@@ -168,7 +168,7 @@ class ExtractionMultiFormatPipelineTest(unittest.TestCase):
 
                     results = {}
 
-                    # --- Real la instancia real resources, per format present ---
+                    # --- Real resources from the instance, per format present ---
                     real_targets = {
                         "pdf": [".pdf"], "docx": [".docx"], "ppsx": [".ppsx"],
                         "xlsx": [".xlsx"], "image": [".png", ".jpg", ".jpeg"],
@@ -176,13 +176,13 @@ class ExtractionMultiFormatPipelineTest(unittest.TestCase):
                     for label, exts in real_targets.items():
                         candidates = [d for ext in exts for d in by_ext.get(ext, [])]
                         if not candidates:
-                            print(f"[smoke] {label}: NOT FOUND in real la instancia real courses, skipping")
+                            print(f"[smoke] {label}: NOT FOUND in the real courses, skipping")
                             continue
                         smallest = min(candidates, key=lambda d: d.name)
                         version = ingestion.ingest(smallest)
                         doc = extraction.extract(version.id)
                         print(
-                            f"[smoke] {label} (real la instancia real '{smallest.name}'): status={doc.status}, "
+                            f"[smoke] {label} (a real one '{smallest.name}'): status={doc.status}, "
                             f"extractor={doc.extractor_name}, method={doc.metadata.get('method')}, "
                             f"chars={len(doc.extracted_text or '')}"
                         )
@@ -196,9 +196,9 @@ class ExtractionMultiFormatPipelineTest(unittest.TestCase):
                         print(f"[smoke] html: status={doc.status}, extractor={doc.extractor_name}")
                         results["html"] = doc
                     else:
-                        print("[smoke] html: NOT FOUND in real la instancia real courses, skipping")
+                        print("[smoke] html: NOT FOUND in the real courses, skipping")
 
-                    # --- Local fixtures for formats confirmed absent from real la instancia real ---
+                    # --- Local fixtures for formats confirmed absent from the real instance ---
                     for kind, mimetype in [
                         ("pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
                         ("odt", "application/vnd.oasis.opendocument.text"),
@@ -233,7 +233,7 @@ class ExtractionMultiFormatPipelineTest(unittest.TestCase):
                         )
                         doc = extraction.extract(version.id)
                         print(
-                            f"[smoke] {kind} (LOCAL FIXTURE, not present in real la instancia real): "
+                            f"[smoke] {kind} (LOCAL FIXTURE, not present in the real instance): "
                             f"status={doc.status}, extractor={doc.extractor_name}"
                         )
                         results[kind] = doc

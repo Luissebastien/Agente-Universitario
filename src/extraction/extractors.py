@@ -178,7 +178,7 @@ def is_native_text_sufficient(pages_text: list[str], min_chars_per_page: int = M
     wrongly trigger OCR of the whole document, and a handful of text-heavy
     pages (e.g. a cover/title page) shouldn't mask an otherwise-empty scan.
     The 50-chars-per-page threshold and the median choice were validated
-    empirically in the OCR benchmark against 253 real PDFs (la instancia real + public):
+    empirically in the OCR benchmark against 253 real PDFs (real + public):
     it correctly separated documents with a usable text layer (~97%) from
     the handful that were genuinely image-only, with no observed false
     negatives in that corpus.
@@ -318,7 +318,7 @@ class DocxExtractor(Extractor):
     """DOCX text/table extraction (python-docx) plus, when an OcrEngine is
     configured, OCR of embedded images appended to the text - some real DOCX
     tutorials are almost entirely screenshots with minimal native text (see
-    the OCR benchmark: one real la instancia real tutorial had 1,470 chars of text but 17
+    the OCR benchmark: one a real tutorial had 1,470 chars of text but 17
     embedded images), so skipping them would lose most of the document.
     """
 

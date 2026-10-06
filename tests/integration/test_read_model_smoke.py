@@ -1,4 +1,4 @@
-"""Gated smoke test: syncs real la instancia real data (courses, classification,
+"""Gated smoke test: syncs real data (courses, classification,
 assignments, grades, calendar, and a couple of course contents) and then
 exercises AcademicReadModel against it - courses, assignments, grades,
 calendar, materials, and extracted documents.

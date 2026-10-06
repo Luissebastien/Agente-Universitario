@@ -87,7 +87,7 @@ class MoodleSync:
 
         This is Moodle's own dashboard/mobile-app course classification
         ('inprogress' | 'past' | 'future'), not a heuristic derived here from
-        startdate/enddate - verified against the real la instancia real instance to
+        startdate/enddate - verified against the real Moodle instance to
         return exactly the same courses as sync_courses(), correctly split
         by classification. A course must already exist in `courses` (i.e.
         sync_courses() has run) for this to have any effect - it only

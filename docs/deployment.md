@@ -280,7 +280,7 @@ ignora lo que no conoce en lugar de romperse.
 
 ## 11. Límites y decisiones vigentes
 
-Valores derivados del corpus real de la instancia real (199 archivos: mediana 0.09 MB,
+Valores derivados del corpus real (199 archivos: mediana 0.09 MB,
 p99 11.42 MB, mayor 34.24 MB; documento más pesado un libro de 786 páginas de
 5.93 MB):
 

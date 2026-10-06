@@ -143,7 +143,7 @@ class AssignmentSubmissionStatusModelTests(unittest.TestCase):
         self.assertIsNone(status.submission_status)
 
     def test_from_moodle_falls_back_to_teamsubmission_when_no_individual_submission(self) -> None:
-        # Real shape observed against la instancia real for a group (teamsubmission)
+        # Real shape observed against the real instance for a group (teamsubmission)
         # assignment the group has not yet attempted: 'lastattempt' has a
         # 'teamsubmission' object but no 'submission' key at all. Before the
         # fix this silently produced submission_status=None, making a real

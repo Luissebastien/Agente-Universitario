@@ -26,7 +26,7 @@ class IsAssignmentPendingTests(unittest.TestCase):
 
     def test_no_due_date_zero_is_never_pending(self) -> None:
         # Moodle's own "no due date set" convention (duedate == 0) - a real
-        # case confirmed against la instancia real, not hypothetical.
+        # case confirmed against the real instance, not hypothetical.
         self.assertFalse(is_assignment_pending(0, "new", NOW))
 
     def test_unknown_submission_status_is_never_pending(self) -> None:

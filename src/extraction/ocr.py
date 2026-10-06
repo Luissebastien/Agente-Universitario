@@ -259,7 +259,7 @@ def ocr_embedded_images(
 def extract_ooxml_slide_text(data: bytes) -> tuple[str, int]:
     """Manual OOXML text extraction for presentations (stdlib zipfile+
     ElementTree). Used for BOTH .pptx and .ppsx: python-pptx works for .pptx
-    but rejects .ppsx outright (confirmed against real la instancia real files in the OCR
+    but rejects .ppsx outright (confirmed against the real files in the OCR
     benchmark - it validates the internal content-type and only accepts
     'presentationml.presentation', not 'presentationml.slideshow'). Rather
     than special-case two code paths, this one reader handles both, since it
