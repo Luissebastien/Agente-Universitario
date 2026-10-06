@@ -1,0 +1,67 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # El audit tiene sentido aunque nadie toque el codigo: los advisories
+  # aparecen por su cuenta.
+  schedule:
+    - cron: "0 6 * * 1"
+
+jobs:
+  tests:
+    name: suite (426 tests)
+    runs-on: ubuntu-latest
+    # Runners arm64 gratuitos para repositorios publicos: cambiar a
+    # ubuntu-24.04-arm haria que el CI corriese en la misma arquitectura
+    # que la VPS. Se deja en x86_64 porque los wheels aarch64 ya estan
+    # verificados y lo que el CI protege son regresiones de Python.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: constraints.txt
+
+      - name: torch desde el indice CPU
+        # Obligatorio en Linux: el wheel de torch en PyPI declara dependencias
+        # de CUDA (nvidia-cudnn son 651 MB por si solo, el conjunto pasa de
+        # 4 GB) aunque no haya GPU. Las versiones salen de constraints.txt
+        # para que no se desincronicen de lo que corre en produccion.
+        run: |
+          python -m pip install --upgrade pip
+          TORCH=$(grep -E '^torch==' constraints.txt)
+          TORCHVISION=$(grep -E '^torchvision==' constraints.txt)
+          echo "Instalando $TORCH y $TORCHVISION desde el indice CPU"
+          python -m pip install --index-url https://download.pytorch.org/whl/cpu \
+            "$TORCH" "$TORCHVISION"
+
+      - name: proyecto y dependencias fijadas
+        run: python -m pip install -c constraints.txt -e .
+
+      - name: comprobar que no entro la pila CUDA
+        # Si esto falla, alguien instalo torch sin el indice CPU y el runner
+        # se esta trayendo gigabytes que no hacen falta.
+        run: |
+          if python -m pip list | grep -iE "nvidia|^cuda|triton"; then
+            echo "::error::Se instalaron paquetes CUDA; revisar el paso anterior"
+            exit 1
+          fi
+          echo "Sin paquetes CUDA, correcto"
+
+      - name: suite
+        run: python -m unittest discover -s tests -t .
+
+  audit:
+    name: advisories de dependencias
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: consultar OSV para las versiones fijadas
+        run: python .github/osv-audit.py
