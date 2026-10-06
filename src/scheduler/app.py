@@ -18,6 +18,7 @@ from ingestion.storage import FilesystemStorage
 from moodle.client import MoodleClient
 from notifications.providers import LogNotificationProvider, NotificationProvider
 from notifications.service import NotificationService
+from notifications.telegram import telegram_provider_from_env
 from scheduler.config import (
     EXTRACTION,
     INGESTION,
@@ -62,7 +63,7 @@ def build_scheduler(
             # DEC-053: docTR is the MVP OCR engine (model loads lazily on first OCR).
             return Extraction(storage, conn, ocr_engine=DoctrOcrEngine())
     service = NotificationService(
-        conn, provider or LogNotificationProvider(), config.timezone,
+        conn, notification_provider(provider), config.timezone,
         config.notifications.due_soon_hours,
     )
     jobs = {
@@ -72,6 +73,25 @@ def build_scheduler(
         NOTIFICATIONS: NotificationJob(conn, service),
     }
     return Scheduler(conn, jobs, config, on_job_failed=service.notify_job_failure)
+
+
+def notification_provider(explicit: NotificationProvider | None = None) -> NotificationProvider:
+    """Which channel delivers notifications in this process.
+
+    Telegram when both of its environment variables are set, the process log
+    otherwise. The choice is made per process from the environment alone, so
+    enabling or disabling Telegram is a deployment change (set or remove the
+    two variables and restart), never a code change - which is also the
+    rollback path.
+    """
+    if explicit is not None:
+        return explicit
+    telegram = telegram_provider_from_env()
+    if telegram is not None:
+        logger.info("Notifications will be delivered to Telegram")
+        return telegram
+    logger.info("Telegram is not configured: notifications are written to the log only")
+    return LogNotificationProvider()
 
 
 def configure_logging(config: SchedulerConfig) -> None:

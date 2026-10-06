@@ -209,6 +209,60 @@ sudo -u agente-u sqlite3 -column -header /var/lib/agente-u/agente_u.sqlite3 \
 
 ---
 
+## Notificaciones
+
+El canal se decide **al arrancar el proceso**, leyendo el entorno. Con
+`TELEGRAM_BOT_TOKEN` y `TELEGRAM_CHAT_ID` puestas, va a Telegram; sin ellas,
+al log. Para saber cuál está activo ahora mismo:
+
+```sh
+sudo journalctl -u agente-u --since "$(systemctl show -p ActiveEnterTimestamp --value agente-u)" | grep -i "notifications will be\|telegram is not configured\|half configured"
+```
+
+Una de estas tres líneas aparece siempre en el arranque:
+
+| Línea | Significa |
+|---|---|
+| `Notifications will be delivered to Telegram` | las dos variables están puestas |
+| `Telegram is not configured: ...` | ninguna de las dos está puesta |
+| `Telegram is only half configured (X is missing)` | falta una: sigue por log |
+
+Comprobar que la entrega funciona, sin esperar a que venza una tarea:
+
+```sh
+sudo journalctl -u agente-u -S "1 week ago" | grep "Telegram notification"
+```
+
+`Telegram notification delivered: <tipo> for <sujeto>` por cada mensaje
+entregado. Verás el tipo y el sujeto (`assignment:104926`), **nunca el texto**:
+el contenido académico va a Telegram, no al log del sistema.
+
+### Si Telegram falla
+
+Un fallo de entrega no detiene nada: el job de notificaciones queda en
+`failed`, el scheduler sigue con su ciclo, y la notificación **no se marca
+como enviada**, así que se reintenta en el siguiente ciclo.
+
+```sh
+sudo journalctl -u agente-u -p warning -S "1 day ago" | grep -i telegram
+```
+
+Los errores dicen el estado HTTP y el motivo de Telegram (`HTTP 401:
+Unauthorized` = token malo; `chat not found` = `TELEGRAM_CHAT_ID` malo). El
+token nunca aparece en ellos.
+
+La semántica es **at-least-once**: si el proceso muere justo entre que
+Telegram acepta el mensaje y que se registra como enviado, el recordatorio se
+envía otra vez en el siguiente ciclo. Es decir, **puedes ver un duplicado**.
+Es deliberado: un recordatorio repetido es inofensivo, uno perdido no.
+
+### Desactivar Telegram
+
+Borra las dos líneas de `/etc/agente-u/env` y reinicia. Vuelve al canal de log
+sin tocar código ni base de datos.
+
+---
+
 ## Logs
 
 journald guarda **todo el historial**, no solo lo que ves con `-f`:
@@ -300,13 +354,16 @@ sudo systemctl start agente-u
 ### Comprobar el entorno sin exponer el token
 
 ```sh
-sudo awk -F= '/^MOODLE_URL=/{print "URL:", $2} /^MOODLE_TOKEN=/{print "token: longitud", length($2)}' \
+sudo awk -F= '/^MOODLE_URL=/{print "URL:", $2} \
+              /^MOODLE_TOKEN=/{print "moodle token: longitud", length($2)} \
+              /^TELEGRAM_BOT_TOKEN=/{print "telegram token: longitud", length($2)} \
+              /^TELEGRAM_CHAT_ID=/{print "telegram chat id: definido"}' \
      /etc/agente-u/env
 sudo grep -c $'\r' /etc/agente-u/env    # debe dar 0: los CR rompen el parseo de systemd
 ```
 
 Nunca imprimas el archivo entero: `MOODLE_TOKEN` es la credencial completa de
-tu Moodle.
+tu Moodle, y `TELEGRAM_BOT_TOKEN` el control total del bot.
 
 ---
 

@@ -24,8 +24,11 @@ User=agente-u
 Group=agente-u
 WorkingDirectory=/opt/agente-u
 
-; MOODLE_URL and MOODLE_TOKEN only. Must be chmod 600, owned by root, and
-; never inside /opt/agente-u (which is a git checkout).
+; Credentials only: MOODLE_URL and MOODLE_TOKEN, plus TELEGRAM_BOT_TOKEN and
+; TELEGRAM_CHAT_ID when notifications go to Telegram (both or neither - with
+; only one the process still starts and falls back to the log channel).
+; Must be chmod 600, owned by root, and never inside /opt/agente-u (which is
+; a git checkout).
 EnvironmentFile=/etc/agente-u/env
 
 ; Keep the docTR model weights inside the state directory instead of the

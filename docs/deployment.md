@@ -122,23 +122,54 @@ sudo chmod 600 /etc/agente-u/env
 sudo chown root:root /etc/agente-u/env
 ```
 
-El token **solo** vive en este archivo. Nunca en `scheduler.toml`, nunca en el
-repositorio, nunca en una variable de entorno de tu shell interactivo (queda
+Los tokens **solo** viven en este archivo. Nunca en `scheduler.toml`, nunca en
+el repositorio, nunca en una variable de entorno de tu shell interactivo (queda
 en el historial). `scheduler.toml` no admite secretos por diseño.
 
 El archivo tiene que estar en modo 600: lo lee systemd como root antes de
 bajar a `agente-u`, de modo que el propio servicio no necesita leerlo.
 
+### Telegram (opcional)
+
+Si no configuras nada, las notificaciones se escriben solo en el log y el
+sistema funciona igual. Para enviarlas a Telegram añade **las dos** variables
+al mismo archivo:
+
+```sh
+sudo tee -a /etc/agente-u/env >/dev/null <<'EOF'
+TELEGRAM_BOT_TOKEN=<el-token-que-te-da-BotFather>
+TELEGRAM_CHAT_ID=<tu-chat-id>
+EOF
+sudo systemctl restart agente-u
+```
+
+Para obtenerlas, una sola vez:
+
+1. En Telegram, habla con `@BotFather`, `/newbot`, y copia el token que
+   devuelve (formato `123456789:AA...`).
+2. Envíale **cualquier mensaje a tu propio bot** (si no, Telegram no te deja
+   escribirle: un bot no puede iniciar una conversación).
+3. Pide tu `chat_id`:
+
+```sh
+curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | grep -o '"chat":{"id":[-0-9]*'
+```
+
+Con solo una de las dos variables, el arranque **no falla**: deja un aviso en
+el log y sigue con el canal de log. Para desactivar Telegram, borra las dos
+líneas y reinicia — no hay cambio de código ni migración que deshacer.
+
 ---
 
 ## 5. Salida de red
 
-Solo dos destinos, ambos HTTPS:
+Tres destinos, todos HTTPS:
 
 | Host | Para qué | Cuándo |
 |---|---|---|
 | `campusvirtual.example.edu` | sincronización y descarga de archivos | cada ciclo |
 | `doctr-static.mindee.com` | pesos de los modelos OCR | solo la primera vez que se usa OCR |
+| `api.telegram.org` | envío de notificaciones | solo si Telegram está configurado, y solo cuando hay algo que notificar |
 
 Si restringes la salida, **bloquea el puerto 80**. La librería docTR, si falla
 la descarga por HTTPS, reintenta automáticamente por HTTP en claro
