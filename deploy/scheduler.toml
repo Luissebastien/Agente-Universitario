@@ -34,4 +34,9 @@ max_seconds = 1800
 
 [notifications]
 enabled = true
+# Reminders run on their own clock schedule, independent of the Moodle sync
+# chain: hourly means 00:00, 01:00, 02:00 ... in the configured timezone.
+# The period must divide 24 evenly, and must not be longer than the narrowest
+# reminder window, or that window can fall between two runs and be missed.
+interval_hours = 1
 due_soon_hours = 24

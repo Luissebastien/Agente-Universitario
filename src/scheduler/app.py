@@ -20,11 +20,11 @@ from notifications.providers import LogNotificationProvider, NotificationProvide
 from notifications.service import NotificationService
 from notifications.telegram import telegram_provider_from_env
 from scheduler.config import (
+    ALL_JOBS,
     EXTRACTION,
     INGESTION,
     MOODLE_SYNC,
     NOTIFICATIONS,
-    PIPELINE,
     SchedulerConfig,
 )
 from scheduler.jobs import (
@@ -179,7 +179,7 @@ def print_status(config: SchedulerConfig) -> int:
         if requests:
             print("Manual requests waiting for the scheduler: "
                   + ", ".join(f"{r['job_name']} ({_local(r['requested_at'], tz)})" for r in requests))
-        for job_name in PIPELINE:
+        for job_name in ALL_JOBS:
             print(f"\n[{job_name}] enabled={config.is_enabled(job_name)}")
             last = history.last_execution(conn, job_name)
             if last is None:

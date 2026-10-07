@@ -119,8 +119,8 @@ Para el servicio, avanza a la revisión publicada, reinstala solo lo que haya
 cambiado, corre la suite de tests en la propia VPS y arranca de nuevo.
 
 **Si los tests fallan deja el servicio parado** e imprime el comando de vuelta
-atrás. Es deliberado: el scheduler corre cada 6 horas y nunca repone ciclos
-perdidos, así que estar parado un rato no cuesta nada, mientras que un ciclo
+atrás. Es deliberado: el scheduler sincroniza cada 6 horas y nunca repone
+ranuras perdidas, así que estar parado un rato no cuesta nada, mientras que un ciclo
 defectuoso escribe en la base de datos.
 
 ### Volver a una versión anterior
@@ -206,6 +206,58 @@ sudo -u agente-u sqlite3 -column -header /var/lib/agente-u/agente_u.sqlite3 \
 "SELECT job_name, status, started_at, duration_seconds AS seg, items_processed AS items, error
  FROM scheduler_executions ORDER BY id DESC LIMIT 20;"
 ```
+
+---
+
+## Calendarios
+
+Cada job programado corre a **horas reales del reloj** en
+`America/Santo_Domingo`, no a N horas de cuando arrancó el proceso:
+
+| Job | Periodo | Corre a las |
+|---|---|---|
+| `moodle_sync` | 6 h | 00:00, 06:00, 12:00, 18:00 |
+| `notifications` | 1 h | cada hora en punto |
+
+Si reinicias a las 17:43, el siguiente aviso no es a las 18:43: es a las
+18:00. Y si la maquina estuvo apagada, **las ranuras perdidas no se reponen**
+— al volver se calcula la siguiente ranura futura y ya.
+
+`moodle_sync` arrastra consigo a `ingestion` y `extraction`, que no tienen
+calendario propio: existen para procesar lo que trajo una sincronizacion.
+
+`notifications` **no depende de esa cadena**. Decide a partir del estado ya
+confirmado localmente, asi que una caida de Moodle no silencia los
+recordatorios. Lo que impide avisar sobre datos sin confirmar no es el
+calendario, sino la comprobacion `confirmed_since` dentro del servicio.
+
+Al arrancar veras una linea por cada calendario:
+
+```
+INFO scheduler: moodle_sync scheduled every 6h; next run at 2026-10-07T00:00:00-04:00
+INFO scheduler: notifications scheduled every 1h; next run at 2026-10-06T21:00:00-04:00
+```
+
+### Cambiar un periodo
+
+En `/etc/agente-u/scheduler.toml`, `interval_hours` de la seccion
+correspondiente. **Tiene que dividir a 24** (1, 2, 3, 4, 6, 8, 12 o 24): con
+cualquier otro valor la rejilla dejaria un salto corto en medianoche, y el
+arranque falla diciendolo en vez de montar un calendario que no es el que
+pone el archivo.
+
+Hay un segundo limite, este de criterio: **el periodo no debe superar la
+ventana de recordatorio mas estrecha**. Con avisos de "1 hora antes", un
+ciclo de 2 horas haria que esa ventana cayera entre dos ejecuciones y el
+aviso no llegara nunca.
+
+### Por que un run no deja rastro en el historial
+
+Un job programado se pregunta primero si tiene algo que hacer. Si no lo
+tiene, se salta **sin escribir fila** en `scheduler_executions`. Por eso
+`notifications` corre 24 veces al dia pero solo aparece en el historial los
+dias que envio algo. Es deliberado: mantiene legible una tabla que no se
+purga nunca.
 
 ---
 

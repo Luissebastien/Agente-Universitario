@@ -65,7 +65,12 @@ class Job(abc.ABC):
 
     def has_work(self) -> bool:
         """Cheap, local, network-free: is there anything for run() to do?
-        Used when the job is reached through the dependency chain."""
+
+        Asked before every automatic run - through the dependency chain or on
+        a clock schedule - so a job that has nothing to do is skipped without
+        leaving an execution row. The default says yes: a job that cannot
+        answer cheaply should just run.
+        """
         return True
 
     @abc.abstractmethod

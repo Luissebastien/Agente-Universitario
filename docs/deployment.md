@@ -221,7 +221,8 @@ Qué debe pasar:
 
 1. **Arranque** → una sincronización *completa* (`detail: full: ...`), no incremental.
 2. **Cadena** → `moodle_sync` → `ingestion` → `extraction` → `notifications`, en ese orden y de a una.
-3. **Segundo ciclo** (a las 6 h) → `detail: incremental: ...`.
+3. **Segundo ciclo** (en la siguiente ranura del reloj: 00:00, 06:00, 12:00
+   o 18:00) → `detail: incremental: ...`.
 4. **Reinicio de la VM** → arranca solo y vuelve a hacer una sincronización completa. **No** repone los ciclos perdidos; eso es intencional.
 5. **Sin token en los logs** → `journalctl -u agente-u | grep -c '<primeros-8-del-token>'` debe dar `0`.
 6. **Segunda instancia rechazada** → ejecutar el scheduler a mano mientras el servicio corre debe salir con código 2.
@@ -268,8 +269,8 @@ alguna de `deploy/*.service` o `.timer`.
 
 **Si los tests fallan, deja el servicio parado a propósito** e imprime el
 comando exacto de vuelta atrás. Arrancar código que falla sus propias pruebas
-sería peor que un scheduler inactivo un rato: corre cada 6 horas y nunca
-repone ciclos perdidos, así que estar parado no cuesta nada, mientras que un
+sería peor que un scheduler inactivo un rato: sincroniza cada 6 horas y nunca
+repone ranuras perdidas, así que estar parado no cuesta nada, mientras que un
 ciclo defectuoso escribe en la base de datos.
 
 Código Python a secas no necesita reinstalar nada, porque la instalación es

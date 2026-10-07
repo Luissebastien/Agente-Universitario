@@ -28,7 +28,7 @@ def make_config(**overrides) -> SchedulerConfig:
         moodle_sync=MoodleSyncConfig(enabled=True, interval_hours=6),
         ingestion=BudgetConfig(enabled=True, max_items=100, max_seconds=1800),
         extraction=BudgetConfig(enabled=True, max_items=50, max_seconds=1800),
-        notifications=NotificationsConfig(enabled=True, due_soon_hours=24),
+        notifications=NotificationsConfig(enabled=True, interval_hours=1, due_soon_hours=24),
     )
     return dataclasses.replace(config, **overrides)
 

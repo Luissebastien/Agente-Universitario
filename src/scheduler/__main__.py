@@ -16,7 +16,7 @@ from scheduler.app import (
     run_daemon,
     run_manual,
 )
-from scheduler.config import DEFAULT_CONFIG_PATH, PIPELINE, ConfigError, load_config
+from scheduler.config import ALL_JOBS, DEFAULT_CONFIG_PATH, ConfigError, load_config
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -24,7 +24,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH,
                         help=f"configuration file (default: {DEFAULT_CONFIG_PATH})")
     mode = parser.add_mutually_exclusive_group()
-    mode.add_argument("--job", choices=PIPELINE, help="run one job now (manual execution)")
+    mode.add_argument("--job", choices=ALL_JOBS, help="run one job now (manual execution)")
     mode.add_argument("--status", action="store_true", help="show scheduler status and history")
     args = parser.parse_args(argv)
 

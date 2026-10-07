@@ -29,7 +29,7 @@ from notifications.telegram import (
     telegram_provider_from_env,
 )
 from scheduler.app import notification_provider
-from scheduler.config import INGESTION, MOODLE_SYNC, PIPELINE
+from scheduler.config import ALL_JOBS, INGESTION, MOODLE_SYNC
 from scheduler.jobs import TRIGGER_MANUAL
 from scheduler.redaction import redact, safe_error
 from scheduler.scheduler import MAX_ATTEMPTS, Scheduler
@@ -404,7 +404,7 @@ class SchedulerIsolationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.conn = connect(":memory:")
         self.time = FakeTime(NOW)
-        self.jobs = {name: FakeJob(name, time=self.time) for name in PIPELINE}
+        self.jobs = {name: FakeJob(name, time=self.time) for name in ALL_JOBS}
         provider = TelegramNotificationProvider(
             FAKE_TOKEN, FAKE_CHAT_ID, urlopen=FakeTransport(error=urllib.error.URLError("down"))
         )

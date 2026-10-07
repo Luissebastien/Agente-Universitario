@@ -1,4 +1,5 @@
 from scheduler.config import (
+    ALL_JOBS,
     EXTRACTION,
     INGESTION,
     MOODLE_SYNC,
@@ -23,6 +24,7 @@ __all__ = [
     "Outcome",
     "MAX_ATTEMPTS",
     "PIPELINE",
+    "ALL_JOBS",
     "MOODLE_SYNC",
     "INGESTION",
     "EXTRACTION",

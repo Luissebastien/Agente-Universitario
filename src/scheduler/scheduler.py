@@ -17,7 +17,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from database import scheduler_repository as history
-from scheduler.config import MOODLE_SYNC, PIPELINE, SchedulerConfig
+from scheduler.config import ALL_JOBS, MOODLE_SYNC, PIPELINE, SchedulerConfig
+from scheduler.schedules import next_aligned
 from scheduler.jobs import (
     TRIGGER_DEPENDENCY,
     TRIGGER_INTERVAL,
@@ -73,7 +74,7 @@ class Scheduler:
         sleep: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
-        missing = set(PIPELINE) - set(jobs)
+        missing = set(ALL_JOBS) - set(jobs)
         if missing:
             raise ValueError(f"missing job(s): {', '.join(sorted(missing))}")
         self._conn = conn
@@ -83,10 +84,13 @@ class Scheduler:
         self._clock = clock or (lambda: datetime.now(config.timezone))
         self._sleep = sleep
         self._monotonic = monotonic
-        self._interval = timedelta(hours=config.moodle_sync.interval_hours)
+        self._periods = config.schedules
         self._queue: deque[_QueuedRun] = deque()
         self._running: str | None = None
-        self._next_sync_due: datetime | None = None
+        # Job -> the clock instant its next automatic run is due. Held only in
+        # memory: the grid is a pure function of the clock (see schedules.py),
+        # so a restart recomputes exactly the same instants.
+        self._next_run: dict[str, datetime] = {}
         self._stop = False
 
     # ---- public API ----------------------------------------------------
@@ -101,7 +105,12 @@ class Scheduler:
 
     @property
     def next_sync_due(self) -> datetime | None:
-        return self._next_sync_due
+        return self._next_run.get(MOODLE_SYNC)
+
+    @property
+    def next_run_times(self) -> dict[str, datetime]:
+        """When each scheduled job is next due, for status output and tests."""
+        return dict(self._next_run)
 
     @property
     def stop_requested(self) -> bool:
@@ -152,13 +161,23 @@ class Scheduler:
             self.request(MOODLE_SYNC, TRIGGER_STARTUP)
         else:
             logger.warning("moodle_sync is disabled: no startup sync and no automatic cycles")
-        self._next_sync_due = self._clock() + self._interval
+        # Every scheduled job joins its clock grid at the next future slot.
+        # Only moodle_sync gets a run at startup, deliberately: it reconciles
+        # state the process may have missed, while an off-grid notification
+        # run would just be a reminder at an arbitrary minute.
+        now = self._clock()
+        for job_name, period in self._periods.items():
+            if not self._config.is_enabled(job_name):
+                continue
+            self._next_run[job_name] = next_aligned(now, period)
+            logger.info("%s scheduled every %dh; next run at %s",
+                        job_name, period, self._fmt(self._next_run[job_name]))
 
     def step(self) -> bool:
         """One loop iteration: pick up manual requests, check the interval,
         run the next queued job. Returns whether a job was taken from the queue."""
         self._handle_manual_requests()
-        self._check_interval()
+        self._check_schedules()
         if not self._queue or self._stop:
             return False
         self._run_next()
@@ -166,7 +185,7 @@ class Scheduler:
 
     def run_forever(self) -> None:
         """Daemon loop, until request_stop()."""
-        logger.info("Scheduler running; next automatic moodle_sync at %s", self._fmt(self._next_sync_due))
+        logger.info("Scheduler running; next automatic runs: %s", self._fmt_schedules())
         while not self._stop:
             if not self.step():
                 self._idle_wait()
@@ -180,15 +199,22 @@ class Scheduler:
 
     # ---- loop internals ------------------------------------------------
 
-    def _check_interval(self) -> None:
-        if self._next_sync_due is None or not self._config.moodle_sync.enabled:
-            return
+    def _check_schedules(self) -> None:
+        """Queue every scheduled job whose slot has arrived.
+
+        Walked in ALL_JOBS order so that when two grids coincide - 00:00 is on
+        both an hourly and a six-hourly one - the order is always the same and
+        the sync goes first. They still run one at a time: this only queues.
+        """
         now = self._clock()
-        if now >= self._next_sync_due:
-            self.request(MOODLE_SYNC, TRIGGER_INTERVAL)
-            # From *now*, not from the missed due time: after a long sleep or
-            # suspend exactly one sync runs, never a burst of catch-up runs.
-            self._next_sync_due = now + self._interval
+        for job_name in ALL_JOBS:
+            due = self._next_run.get(job_name)
+            if due is None or now < due:
+                continue
+            self.request(job_name, TRIGGER_INTERVAL)
+            # Computed from *now*, so slots missed while the process was down
+            # or asleep are skipped rather than replayed as a burst.
+            self._next_run[job_name] = next_aligned(now, self._periods[job_name])
 
     def _handle_manual_requests(self) -> None:
         for row in history.pending_requests(self._conn):
@@ -205,10 +231,11 @@ class Scheduler:
             history.delete_request(self._conn, row["id"])
 
     def _idle_wait(self) -> None:
+        """Sleep until the earliest of: the next poll, the next scheduled slot."""
+        now = self._clock()
         seconds = POLL_SECONDS
-        if self._next_sync_due is not None:
-            until_due = (self._next_sync_due - self._clock()).total_seconds()
-            seconds = max(0.0, min(seconds, until_due))
+        for due in self._next_run.values():
+            seconds = min(seconds, max(0.0, (due - now).total_seconds()))
         self._sleep_interruptibly(seconds)
 
     def _sleep_interruptibly(self, seconds: float) -> bool:
@@ -229,11 +256,19 @@ class Scheduler:
         elif outcome is Outcome.FAILED:
             self._stop_chain(item.job_name)
 
+    def _downstream_of(self, job_name: str) -> tuple[str, ...]:
+        """The chain jobs that follow this one - empty for a job that is not
+        part of the chain at all (notifications), which therefore neither
+        triggers anything downstream nor cancels anything when it fails."""
+        if job_name not in PIPELINE:
+            return ()
+        return PIPELINE[PIPELINE.index(job_name) + 1:]
+
     def _continue_chain(self, job_name: str) -> None:
-        index = PIPELINE.index(job_name)
-        if index + 1 >= len(PIPELINE):
+        downstream = self._downstream_of(job_name)
+        if not downstream:
             return
-        child = PIPELINE[index + 1]
+        child = downstream[0]
         if not self._config.is_enabled(child):
             # §11: a dependent is eligible only after its parent succeeds, so a
             # disabled job ends the automatic chain instead of being skipped over.
@@ -246,7 +281,7 @@ class Scheduler:
         (e.g. from an earlier chain) are cancelled so nothing downstream runs
         as if the upstream state were current. Manual requests are explicit
         user actions and are kept (they log a warning when they run)."""
-        downstream = set(PIPELINE[PIPELINE.index(job_name) + 1:])
+        downstream = set(self._downstream_of(job_name))
         kept: deque[_QueuedRun] = deque()
         for item in self._queue:
             if item.job_name in downstream and item.trigger == TRIGGER_DEPENDENCY:
@@ -283,7 +318,11 @@ class Scheduler:
     def _attempt(self, job: Job, item: _QueuedRun, attempt: int) -> bool:
         """One attempt. True = ran, False = skipped (no work); raises
         _AttemptFailed on failure (already recorded in history)."""
-        if item.trigger == TRIGGER_DEPENDENCY:
+        # Asked for every automatic trigger, not just chained ones: a job on a
+        # clock schedule wakes up far more often than it has work, and a run
+        # that found nothing to do should leave no execution row behind. A
+        # manual request always runs - the user asked for it explicitly.
+        if item.trigger in (TRIGGER_DEPENDENCY, TRIGGER_INTERVAL):
             try:
                 has_work = job.has_work()
             except Exception as exc:  # noqa: BLE001 - unknown state is a failure, never a skip
@@ -335,6 +374,8 @@ class Scheduler:
         return True
 
     def _warn_if_upstream_failed(self, job_name: str) -> None:
+        if job_name not in PIPELINE:
+            return  # not part of the chain, so it has no upstream to be stale
         for upstream in PIPELINE[: PIPELINE.index(job_name)]:
             last = history.last_execution(self._conn, upstream)
             if last is not None and last.status == history.STATUS_FAILED:
@@ -353,6 +394,13 @@ class Scheduler:
 
     def _now_iso(self) -> str:
         return self._clock().astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+    def _fmt_schedules(self) -> str:
+        return ", ".join(
+            f"{name} at {self._fmt(self._next_run[name])}"
+            for name in ALL_JOBS
+            if name in self._next_run
+        ) or "none scheduled"
 
     def _fmt(self, moment: datetime | None) -> str:
         if moment is None:

@@ -75,6 +75,28 @@ class LoadConfigTests(ConfigTestCase):
         with self.assertRaises(ConfigError):
             load_config(self.write("[forums]\nenabled = true\n"))
 
+    def test_a_period_that_does_not_divide_the_day_is_rejected(self) -> None:
+        # 5 hours would give 00, 05, 10, 15, 20 and then a 4-hour step, so the
+        # schedule would not be the uniform one the file appears to describe.
+        for text in (
+            "[moodle_sync]\ninterval_hours = 5\n",
+            "[moodle_sync]\ninterval_hours = 7\n",
+            "[moodle_sync]\ninterval_hours = 1.5\n",
+            "[moodle_sync]\ninterval_hours = 48\n",
+            "[notifications]\ninterval_hours = 5\n",
+        ):
+            with self.subTest(text=text), self.assertRaises(ConfigError):
+                load_config(self.write(text))
+
+    def test_every_period_that_divides_the_day_is_accepted(self) -> None:
+        for hours in (1, 2, 3, 4, 6, 8, 12, 24):
+            config = load_config(self.write(f"[notifications]\ninterval_hours = {hours}\n"))
+            self.assertEqual(config.notifications.interval_hours, hours)
+
+    def test_schedules_cover_exactly_the_jobs_that_have_a_clock_grid(self) -> None:
+        config = load_config(self.write(""))
+        self.assertEqual(config.schedules, {"moodle_sync": 6, "notifications": 1})
+
     def test_invalid_values_are_rejected(self) -> None:
         for text in (
             "[moodle_sync]\ninterval_hours = 0\n",

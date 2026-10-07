@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from database import scheduler_repository as history
 from database.db import connect
-from scheduler.config import EXTRACTION, INGESTION, MOODLE_SYNC, NOTIFICATIONS, PIPELINE
+from scheduler.config import ALL_JOBS, EXTRACTION, INGESTION, MOODLE_SYNC, NOTIFICATIONS, PIPELINE
 from scheduler.jobs import (
     TRIGGER_DEPENDENCY,
     TRIGGER_INTERVAL,
@@ -27,7 +27,7 @@ class SchedulerTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.conn = connect(":memory:")
         self.time = FakeTime(START)
-        self.jobs = {name: FakeJob(name, time=self.time) for name in PIPELINE}
+        self.jobs = {name: FakeJob(name, time=self.time) for name in ALL_JOBS}
         self.failures: list[tuple[str, str]] = []
 
     def tearDown(self) -> None:
@@ -69,17 +69,29 @@ class SchedulingTests(SchedulerTestCase):
         self.drain(scheduler)
         self.assertEqual(self.runs(MOODLE_SYNC), [TRIGGER_STARTUP])
 
-    def test_next_sync_is_due_one_interval_after_startup(self) -> None:
+    def test_runs_land_on_clock_times_not_on_the_startup_time(self) -> None:
+        # START is 08:00 and the sync grid is 00/06/12/18, so the next run is
+        # at 12:00 - four hours away - not six hours after this process began.
         scheduler = self.make_scheduler()
         scheduler.startup(one_shot=False)
-        self.assertEqual(scheduler.next_sync_due, START + timedelta(hours=6))
+        self.assertEqual(scheduler.next_sync_due, START.replace(hour=12))
 
-    def test_job_not_due_before_the_interval(self) -> None:
+    def test_each_scheduled_job_keeps_its_own_grid(self) -> None:
         scheduler = self.make_scheduler()
+        scheduler.startup(one_shot=False)
+
+        self.assertEqual(
+            scheduler.next_run_times,
+            {MOODLE_SYNC: START.replace(hour=12), NOTIFICATIONS: START.replace(hour=9)},
+        )
+
+    def test_job_not_due_before_its_slot(self) -> None:
+        # Only the sync grid, so nothing else can make step() do work here.
+        scheduler = self.make_scheduler(disabled(make_config(retry_delay_seconds=0), NOTIFICATIONS))
         scheduler.startup(one_shot=False)
         self.drain(scheduler)
 
-        self.time.advance(6 * HOUR - 61)
+        self.time.advance(4 * HOUR - 61)  # 11:58:59, just short of the 12:00 slot
         self.assertFalse(scheduler.step())
         self.assertEqual(self.runs(MOODLE_SYNC), [TRIGGER_STARTUP])
 
@@ -88,7 +100,7 @@ class SchedulingTests(SchedulerTestCase):
         scheduler.startup(one_shot=False)
         self.drain(scheduler)
 
-        self.time.advance(6 * HOUR)
+        self.time.advance(4 * HOUR)  # 12:00
         self.drain(scheduler)
         self.assertEqual(self.runs(MOODLE_SYNC), [TRIGGER_STARTUP, TRIGGER_INTERVAL])
 
@@ -97,11 +109,83 @@ class SchedulingTests(SchedulerTestCase):
         scheduler.startup(one_shot=False)
         self.drain(scheduler)
 
-        self.time.advance(24 * HOUR)  # e.g. laptop suspended for a day: 4 ticks missed
+        self.time.advance(24 * HOUR)  # e.g. laptop suspended for a day: 4 slots missed
         self.drain(scheduler)
 
+        # Exactly one run, and the grid is rejoined at the next future slot
+        # (08:00 the next day -> 12:00), never caught up slot by slot.
         self.assertEqual(self.runs(MOODLE_SYNC), [TRIGGER_STARTUP, TRIGGER_INTERVAL])
-        self.assertEqual(scheduler.next_sync_due, self.time.now + timedelta(hours=6))
+        self.assertEqual(scheduler.next_sync_due, self.time.now.replace(hour=12))
+
+    def test_notifications_run_on_their_own_grid_not_through_the_chain(self) -> None:
+        scheduler = self.make_scheduler()
+        scheduler.startup(one_shot=False)
+        self.drain(scheduler)  # startup sync and the whole chain
+
+        self.assertEqual(self.jobs[NOTIFICATIONS].runs, [])  # not a chain member
+
+        self.time.advance(HOUR)  # 09:00, its own hourly slot
+        self.drain(scheduler)
+        self.assertEqual(self.runs(NOTIFICATIONS), [TRIGGER_INTERVAL])
+
+    def test_notifications_still_run_when_the_sync_chain_failed(self) -> None:
+        # The whole point of taking it off the chain: reminders are decided
+        # from state already stored locally, so a Moodle outage must not
+        # silence them. (confirmed_since, inside the service, is what keeps
+        # unconfirmed data out - not the scheduling.)
+        self.jobs[MOODLE_SYNC].outcomes = [RuntimeError("moodle down")] * MAX_ATTEMPTS
+        scheduler = self.make_scheduler()
+        scheduler.startup(one_shot=False)
+        self.drain(scheduler)
+        self.time.advance(HOUR)
+        self.drain(scheduler)
+
+        self.assertEqual(self.runs(NOTIFICATIONS), [TRIGGER_INTERVAL])
+
+    def test_two_grids_falling_together_both_run_and_sync_goes_first(self) -> None:
+        order: list[str] = []
+        for job in self.jobs.values():
+            job.during_run = lambda j: order.append(j.name)
+        scheduler = self.make_scheduler()
+        scheduler.startup(one_shot=False)
+        self.drain(scheduler)
+        order.clear()
+
+        self.time.advance(4 * HOUR)  # 12:00 is on both the 6h and the 1h grid
+        self.drain(scheduler)
+
+        self.assertEqual(self.runs(MOODLE_SYNC)[-1], TRIGGER_INTERVAL)
+        self.assertEqual(self.runs(NOTIFICATIONS), [TRIGGER_INTERVAL])
+        self.assertEqual(order[0], MOODLE_SYNC)  # the coinciding grids run sync first
+        self.assertIn(NOTIFICATIONS, order)
+        self.assertEqual(len(order), len(set(order)))  # each ran once, one at a time
+
+    def test_a_scheduled_job_with_nothing_to_do_leaves_no_execution_row(self) -> None:
+        # An hourly job is idle most of the time; those runs must not fill the
+        # append-only history with rows saying nothing happened.
+        self.jobs[NOTIFICATIONS]._has_work = False
+        scheduler = self.make_scheduler()
+        scheduler.startup(one_shot=False)
+        self.drain(scheduler)
+        self.time.advance(HOUR)
+        self.drain(scheduler)
+
+        self.assertEqual(self.jobs[NOTIFICATIONS].runs, [])
+        self.assertEqual(self.rows(NOTIFICATIONS), [])
+        self.assertEqual(self.jobs[NOTIFICATIONS].has_work_calls, 1)
+
+    def test_a_manual_run_happens_even_with_no_work_and_does_not_move_the_grid(self) -> None:
+        self.jobs[NOTIFICATIONS]._has_work = False
+        scheduler = self.make_scheduler()
+        scheduler.startup(one_shot=False)
+        self.drain(scheduler)
+
+        self.time.advance(30 * 60)  # 08:30
+        scheduler.request(NOTIFICATIONS, TRIGGER_MANUAL)
+        self.drain(scheduler)
+
+        self.assertEqual(self.runs(NOTIFICATIONS), [TRIGGER_MANUAL])
+        self.assertEqual(scheduler.next_run_times[NOTIFICATIONS], START.replace(hour=9))
 
     def test_interval_is_configurable(self) -> None:
         config = make_config(
@@ -162,13 +246,13 @@ class DependencyTests(SchedulerTestCase):
         self.assertEqual(self.runs(INGESTION), [TRIGGER_DEPENDENCY])
 
     def test_no_change_sync_does_not_trigger_downstream_work(self) -> None:
-        for name in (INGESTION, EXTRACTION, NOTIFICATIONS):
+        for name in (INGESTION, EXTRACTION):
             self.jobs[name]._has_work = False
         scheduler = self.make_scheduler()
         scheduler.startup(one_shot=False)
         self.drain(scheduler)
 
-        for name in (INGESTION, EXTRACTION, NOTIFICATIONS):
+        for name in (INGESTION, EXTRACTION):
             self.assertEqual(self.jobs[name].runs, [], name)
             self.assertEqual(self.rows(name), [], name)  # a skip is not an execution
         self.assertEqual(len(self.rows(MOODLE_SYNC)), 1)
@@ -181,7 +265,6 @@ class DependencyTests(SchedulerTestCase):
 
         self.assertEqual(self.jobs[INGESTION].runs, [])
         self.assertEqual(self.runs(EXTRACTION), [TRIGGER_DEPENDENCY])
-        self.assertEqual(self.runs(NOTIFICATIONS), [TRIGGER_DEPENDENCY])
 
     def test_failed_parent_blocks_downstream(self) -> None:
         self.jobs[MOODLE_SYNC].outcomes = [RuntimeError("moodle down")] * MAX_ATTEMPTS
@@ -189,7 +272,7 @@ class DependencyTests(SchedulerTestCase):
         scheduler.startup(one_shot=False)
         self.drain(scheduler)
 
-        for name in (INGESTION, EXTRACTION, NOTIFICATIONS):
+        for name in (INGESTION, EXTRACTION):
             self.assertEqual(self.jobs[name].runs, [], name)
             self.assertEqual(self.jobs[name].has_work_calls, 0, name)
 
@@ -202,7 +285,6 @@ class DependencyTests(SchedulerTestCase):
         self.assertEqual(len(self.runs(MOODLE_SYNC)), 1)
         self.assertEqual(len(self.runs(INGESTION)), MAX_ATTEMPTS)
         self.assertEqual(self.jobs[EXTRACTION].runs, [])
-        self.assertEqual(self.jobs[NOTIFICATIONS].runs, [])
 
     def test_already_queued_automatic_dependent_is_cancelled_when_upstream_fails(self) -> None:
         # Regression for the design review: a dependent queued by an earlier
@@ -210,10 +292,10 @@ class DependencyTests(SchedulerTestCase):
         self.jobs[MOODLE_SYNC].outcomes = [RuntimeError("moodle down")] * MAX_ATTEMPTS
         scheduler = self.make_scheduler()
         scheduler.request(MOODLE_SYNC, TRIGGER_INTERVAL)
-        scheduler.request(NOTIFICATIONS, TRIGGER_DEPENDENCY)
+        scheduler.request(EXTRACTION, TRIGGER_DEPENDENCY)
         self.drain(scheduler)
 
-        self.assertEqual(self.jobs[NOTIFICATIONS].runs, [])
+        self.assertEqual(self.jobs[EXTRACTION].runs, [])
 
     def test_manual_request_queued_behind_a_failing_upstream_is_still_honored(self) -> None:
         self.jobs[MOODLE_SYNC].outcomes = [RuntimeError("moodle down")] * MAX_ATTEMPTS

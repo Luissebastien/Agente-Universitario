@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from scheduler.schedules import VALID_PERIOD_HOURS
+
 DEFAULT_CONFIG_PATH = Path("config") / "scheduler.toml"
 
 MOODLE_SYNC = "moodle_sync"
@@ -12,10 +14,21 @@ INGESTION = "ingestion"
 EXTRACTION = "extraction"
 NOTIFICATIONS = "notifications"
 
-# The fixed MVP pipeline (.ai/SCHEDULER-MVP-RULES.md §4/§11): each job depends
-# on the one before it. A plain tuple, not a dependency graph - there are no
-# other jobs to model.
-PIPELINE = (MOODLE_SYNC, INGESTION, EXTRACTION, NOTIFICATIONS)
+# The Moodle update chain (.ai/SCHEDULER-MVP-RULES.md §4/§11): each job
+# depends on the one before it. A plain tuple, not a dependency graph - there
+# are no other jobs to model.
+#
+# notifications is deliberately NOT here. It decides from the state already
+# confirmed locally, so it does not need a sync to have just run; chaining it
+# would tie how often the student is reminded to how often Moodle is polled,
+# which are unrelated questions. It runs on its own clock schedule instead,
+# and keeps its own guard (confirmed_since) against unconfirmed data.
+PIPELINE = (MOODLE_SYNC, INGESTION, EXTRACTION)
+
+# Every job the Scheduler knows about, chained or not. Used wherever "all the
+# jobs" is meant - validation, status output - rather than PIPELINE, which now
+# means specifically "the chain".
+ALL_JOBS = PIPELINE + (NOTIFICATIONS,)
 
 # Every value the TOML may set, with its default. Unknown sections/keys are
 # rejected so a typo never silently falls back to a default.
@@ -30,7 +43,7 @@ _DEFAULTS: dict[str, dict[str, object]] = {
     MOODLE_SYNC: {"enabled": True, "interval_hours": 6},
     INGESTION: {"enabled": True, "max_items": 100, "max_seconds": 1800},
     EXTRACTION: {"enabled": True, "max_items": 50, "max_seconds": 1800},
-    NOTIFICATIONS: {"enabled": True, "due_soon_hours": 24},
+    NOTIFICATIONS: {"enabled": True, "interval_hours": 1, "due_soon_hours": 24},
 }
 
 
@@ -41,7 +54,7 @@ class ConfigError(Exception):
 @dataclass(frozen=True)
 class MoodleSyncConfig:
     enabled: bool
-    interval_hours: float
+    interval_hours: int
 
 
 @dataclass(frozen=True)
@@ -54,6 +67,7 @@ class BudgetConfig:
 @dataclass(frozen=True)
 class NotificationsConfig:
     enabled: bool
+    interval_hours: int
     due_soon_hours: float
 
 
@@ -71,6 +85,19 @@ class SchedulerConfig:
 
     def is_enabled(self, job_name: str) -> bool:
         return getattr(self, job_name).enabled
+
+    @property
+    def schedules(self) -> dict[str, int]:
+        """Job -> period in hours, for the jobs that run on a clock schedule.
+
+        Only these two are scheduled. ingestion and extraction have no
+        schedule of their own by design: they exist to process what a sync
+        brought in, so they run through the chain or not at all.
+        """
+        return {
+            MOODLE_SYNC: self.moodle_sync.interval_hours,
+            NOTIFICATIONS: self.notifications.interval_hours,
+        }
 
     @property
     def lock_path(self) -> Path:
@@ -105,12 +132,17 @@ def load_config(path: str | Path) -> SchedulerConfig:
         ),
         moodle_sync=MoodleSyncConfig(
             enabled=_bool(values[MOODLE_SYNC]["enabled"], "moodle_sync.enabled"),
-            interval_hours=_positive(values[MOODLE_SYNC]["interval_hours"], "moodle_sync.interval_hours"),
+            interval_hours=_period_hours(
+                values[MOODLE_SYNC]["interval_hours"], "moodle_sync.interval_hours"
+            ),
         ),
         ingestion=_budget(values, INGESTION),
         extraction=_budget(values, EXTRACTION),
         notifications=NotificationsConfig(
             enabled=_bool(values[NOTIFICATIONS]["enabled"], "notifications.enabled"),
+            interval_hours=_period_hours(
+                values[NOTIFICATIONS]["interval_hours"], "notifications.interval_hours"
+            ),
             due_soon_hours=_positive(
                 values[NOTIFICATIONS]["due_soon_hours"], "notifications.due_soon_hours"
             ),
@@ -174,6 +206,24 @@ def _number(value: object, key: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigError(f"{key} must be a number")
     return float(value)
+
+
+def _period_hours(value: object, key: str) -> int:
+    """A schedule period: whole hours that divide the day evenly.
+
+    Runs happen at real clock times anchored to local midnight, so a period
+    that does not divide 24 would leave a short step there (see
+    schedules.VALID_PERIOD_HOURS). Rejected at load time rather than producing
+    a schedule that is subtly not what the file says.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ConfigError(f"{key} must be a whole number of hours, got {value!r}")
+    if value not in VALID_PERIOD_HOURS:
+        raise ConfigError(
+            f"{key} must divide the day evenly so runs land on the same clock "
+            f"times every day; valid values: {', '.join(map(str, VALID_PERIOD_HOURS))}. Got {value!r}"
+        )
+    return value
 
 
 def _positive(value: object, key: str) -> float:
