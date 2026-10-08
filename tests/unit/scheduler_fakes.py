@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from notifications.reminders import ReminderRule
 from scheduler.config import (
     BudgetConfig,
     MoodleSyncConfig,
@@ -16,6 +17,14 @@ from scheduler.config import (
 from scheduler.jobs import Job, JobResult, RunContext
 
 TZ = ZoneInfo("America/Santo_Domingo")
+
+# The MVP reminder set, with throwaway templates: these tests care about
+# when the Scheduler runs the job, never about what the message says.
+REMINDERS = tuple(
+    ReminderRule(id=f"{hours}h", offset_seconds=hours * 3600,
+                 title_template="{assignment}", body_template="{course} {due}")
+    for hours in (24, 12, 6, 1)
+)
 
 
 def make_config(**overrides) -> SchedulerConfig:
@@ -28,7 +37,7 @@ def make_config(**overrides) -> SchedulerConfig:
         moodle_sync=MoodleSyncConfig(enabled=True, interval_hours=6),
         ingestion=BudgetConfig(enabled=True, max_items=100, max_seconds=1800),
         extraction=BudgetConfig(enabled=True, max_items=50, max_seconds=1800),
-        notifications=NotificationsConfig(enabled=True, interval_hours=1, due_soon_hours=24),
+        notifications=NotificationsConfig(enabled=True, reminders=REMINDERS),
     )
     return dataclasses.replace(config, **overrides)
 

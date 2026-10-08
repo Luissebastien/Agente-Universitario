@@ -114,6 +114,11 @@ Si falla en `cv2`, falta `libgl1` (§1).
 ```sh
 sudo install -m 644 deploy/scheduler.toml /etc/agente-u/scheduler.toml
 
+# Las reglas de recordatorio viven en este archivo, así que una versión que
+# añada o cambie reglas exige reinstalarlo. Si el arranque falla diciendo que
+# 'due_soon_hours no longer exists', es exactamente esto: el archivo es
+# anterior a [[notifications.reminders]].
+
 sudo tee /etc/agente-u/env >/dev/null <<'EOF'
 MOODLE_URL=https://campusvirtual.example.edu
 MOODLE_TOKEN=<pega-aqui-el-token>

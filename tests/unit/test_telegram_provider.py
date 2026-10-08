@@ -20,6 +20,7 @@ from database.db import connect
 from moodle.models import Assignment, AssignmentSubmissionStatus, Course
 from notifications.models import NOTIFICATION_ASSIGNMENT_DUE_SOON, Notification
 from notifications.providers import LogNotificationProvider
+from notifications.reminders import ReminderRule
 from notifications.service import NotificationService
 from notifications.telegram import (
     MAX_MESSAGE_CHARS,
@@ -43,6 +44,9 @@ FAKE_TOKEN = "123456789:AAHfakeTokenForTestsOnly0123456789A"
 FAKE_CHAT_ID = "987654321"
 OK_BODY = b'{"ok":true,"result":{"message_id":1}}'
 NOW = datetime(2026, 10, 2, 12, 0, tzinfo=TZ)
+RULES = (ReminderRule(id="24h", offset_seconds=24 * 3600,
+                      title_template="Tarea por vencer: {assignment}",
+                      body_template="{course} - vence el {due}"),)
 
 
 def a_notification(title: str = "Tarea por vencer: Proyecto", body: str = "Curso - vence manana") -> Notification:
@@ -340,7 +344,7 @@ class TelegramDeliverySemanticsTests(unittest.TestCase):
             FAKE_TOKEN, FAKE_CHAT_ID, urlopen=self.transport
         )
         self.service = NotificationService(
-            self.conn, self.provider, TZ, due_soon_hours=24, clock=lambda: NOW
+            self.conn, self.provider, TZ, lambda: RULES, clock=lambda: NOW
         )
         repo.upsert_courses(self.conn, [Course(id=1, shortname="MB", fullname="MATEMATICA BASICA",
                                                category=None, visible=True, progress=None,
@@ -370,7 +374,7 @@ class TelegramDeliverySemanticsTests(unittest.TestCase):
         failing = TelegramNotificationProvider(
             FAKE_TOKEN, FAKE_CHAT_ID, urlopen=FakeTransport(error=http_error(502, b"{}"))
         )
-        service = NotificationService(self.conn, failing, TZ, due_soon_hours=24, clock=lambda: NOW)
+        service = NotificationService(self.conn, failing, TZ, lambda: RULES, clock=lambda: NOW)
 
         failed = service.send_pending(self.sync_started)
         retried = self.service.send_pending(self.sync_started)  # Telegram is back
@@ -386,7 +390,7 @@ class TelegramDeliverySemanticsTests(unittest.TestCase):
                 FAKE_TOKEN, FAKE_CHAT_ID,
                 urlopen=FakeTransport(error=http_error(401, b'{"ok":false,"description":"Unauthorized"}')),
             ),
-            TZ, due_soon_hours=24, clock=lambda: NOW,
+            TZ, lambda: RULES, clock=lambda: NOW,
         )
 
         with self.assertLogs("notifications.service", level="WARNING") as logs:
@@ -409,7 +413,7 @@ class SchedulerIsolationTests(unittest.TestCase):
             FAKE_TOKEN, FAKE_CHAT_ID, urlopen=FakeTransport(error=urllib.error.URLError("down"))
         )
         self.service = NotificationService(
-            self.conn, provider, TZ, due_soon_hours=24, clock=lambda: NOW
+            self.conn, provider, TZ, lambda: RULES, clock=lambda: NOW
         )
 
     def tearDown(self) -> None:

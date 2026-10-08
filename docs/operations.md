@@ -217,7 +217,7 @@ Cada job programado corre a **horas reales del reloj** en
 | Job | Periodo | Corre a las |
 |---|---|---|
 | `moodle_sync` | 6 h | 00:00, 06:00, 12:00, 18:00 |
-| `notifications` | 1 h | cada hora en punto |
+| `notifications` | 1 h (fijo) | cada hora en punto |
 
 Si reinicias a las 17:43, el siguiente aviso no es a las 18:43: es a las
 18:00. Y si la maquina estuvo apagada, **las ranuras perdidas no se reponen**
@@ -240,16 +240,16 @@ INFO scheduler: notifications scheduled every 1h; next run at 2026-10-06T21:00:0
 
 ### Cambiar un periodo
 
-En `/etc/agente-u/scheduler.toml`, `interval_hours` de la seccion
-correspondiente. **Tiene que dividir a 24** (1, 2, 3, 4, 6, 8, 12 o 24): con
-cualquier otro valor la rejilla dejaria un salto corto en medianoche, y el
-arranque falla diciendolo en vez de montar un calendario que no es el que
-pone el archivo.
+Solo `moodle_sync` tiene periodo configurable, en `interval_hours`. **Tiene
+que dividir a 24** (1, 2, 3, 4, 6, 8, 12 o 24): con cualquier otro valor la
+rejilla dejaria un salto corto en medianoche, y el arranque falla diciendolo
+en vez de montar un calendario que no es el que pone el archivo.
 
-Hay un segundo limite, este de criterio: **el periodo no debe superar la
-ventana de recordatorio mas estrecha**. Con avisos de "1 hora antes", un
-ciclo de 2 horas haria que esa ventana cayera entre dos ejecuciones y el
-aviso no llegara nunca.
+El de `notifications` **esta fijado en 1 hora y no se configura**. El ciclo y
+los recordatorios no son ajustes independientes: un ciclo mas largo mataria en
+silencio el aviso de la ultima hora. Fijarlo deja un suelo claro -los
+recordatorios tienen que estar al menos a una hora unos de otros- y quita un
+ajuste cuyo unico efecto posible era romperlos.
 
 ### Por que un run no deja rastro en el historial
 
@@ -288,6 +288,56 @@ sudo journalctl -u agente-u -S "1 week ago" | grep "Telegram notification"
 `Telegram notification delivered: <tipo> for <sujeto>` por cada mensaje
 entregado. Verás el tipo y el sujeto (`assignment:104926`), **nunca el texto**:
 el contenido académico va a Telegram, no al log del sistema.
+
+### Qué recordatorios se envían
+
+Cada tarea pendiente genera **hasta cuatro avisos**, uno por cada regla de
+`/etc/agente-u/scheduler.toml`:
+
+| Regla | Se envía cuando quedan | Tipo almacenado |
+|---|---|---|
+| `24h` | entre 12 y 24 horas | `assignment_due_24h` |
+| `12h` | entre 6 y 12 horas | `assignment_due_12h` |
+| `6h` | entre 1 y 6 horas | `assignment_due_6h` |
+| `1h` | menos de 1 hora | `assignment_due_1h` |
+
+Cada regla se entrega **como mucho una vez por tarea y fecha de entrega**. Si
+el profesor mueve la fecha, empieza una serie nueva. Si entregas, se detiene
+lo que quede de la serie.
+
+**No hay avisos retroactivos.** Una tarea que aparece por primera vez cuando
+ya le quedan 5 horas solo recibe el aviso de 6 h y el de 1 h: las ventanas de
+24 h y 12 h ya habían pasado y no se mandan a destiempo. Lo mismo si el
+sistema estuvo apagado y se saltó una ventana.
+
+### Cambiar los textos o las reglas
+
+Hoy se cambian en el archivo. También pueden cambiarse en caliente desde una
+interfaz (app o bot), capacidad ya construida pero sin interfaz todavía: ver
+[reminder-configuration.md](reminder-configuration.md).
+
+Las reglas son configuración, no código. En `[[notifications.reminders]]`:
+
+- **cambiar un texto** → edita `title` o `body` y reinicia;
+- **añadir un aviso** (por ejemplo a 3 h) → añade un bloque;
+- **quitar uno** → bórralo, o pon `enabled = false` para conservarlo apagado;
+- **mover un offset** → cambia `offset_hours`.
+
+Las bandas se recalculan solas: si quitas el de 12 h, el de 24 h pasa a cubrir
+de 6 a 24 horas. No hace falta tocar nada más.
+
+Los marcadores disponibles son `{assignment}`, `{course}`, `{due}`,
+`{due_date}`, `{due_time}`, `{remaining}` y `{tz}`. Si escribes uno que no
+existe, **el arranque falla diciéndolo**, en vez de descubrirlo a mitad de un
+envío.
+
+Dos cosas que el arranque también rechaza: dos reglas con el mismo `id` —
+compartirían identidad y solo llegaría una— y dos con el mismo `offset_hours`,
+que haría ambigua la banda.
+
+Cambiar solo el texto de una regla **no** reenvía avisos ya entregados: el
+texto no forma parte de la identidad. Cambiar su `id` sí empieza una serie
+nueva para toda tarea en curso.
 
 ### Si Telegram falla
 

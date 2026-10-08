@@ -215,6 +215,37 @@ CREATE TABLE IF NOT EXISTS notifications_sent (
     UNIQUE (notification_type, subject_key, scheduled_for)
 );
 
+-- The student's own reminder rules, when they have set any.
+--
+-- Empty is not "no reminders": it means they have never chosen, so the rules
+-- configured for the host apply (see notifications.reminders). That is what
+-- lets a deployment ship a sensible set and still be overridden later,
+-- without a flag saying which is in force.
+--
+-- This table is the whole runtime-configuration seam. It is deliberately
+-- free of any interface: whatever ends up offering these settings - Telegram,
+-- a phone app, the CLI - writes exactly these rows through
+-- database/reminder_repository.py, and the Scheduler reads them once per
+-- cycle, so a change takes effect on the next run without a restart.
+CREATE TABLE IF NOT EXISTS reminder_preferences (
+    id TEXT PRIMARY KEY,
+    offset_seconds INTEGER NOT NULL,
+    enabled INTEGER NOT NULL,
+    title_template TEXT NOT NULL,
+    body_template TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+-- One row, written the first time the student saves anything. Without it,
+-- "I want no reminders at all" and "I have never chosen" would both be an
+-- empty reminder_preferences, and muting every reminder would silently
+-- restore the host's. Absence of rows cannot mean two different things, so
+-- the fact that a choice was made is recorded separately from the choice.
+CREATE TABLE IF NOT EXISTS reminder_preferences_saved (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    saved_at TEXT NOT NULL
+);
+
 -- Read Model query support. Each index below backs a specific query the
 -- Read Model actually runs (see src/read_model/) - not a blanket "index
 -- everything". Columns already covered by a PRIMARY KEY or UNIQUE

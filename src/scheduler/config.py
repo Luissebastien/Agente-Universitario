@@ -5,6 +5,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from notifications.reminders import (
+    CYCLE_HOURS,
+    TEMPLATE_FIELDS,
+    ReminderError,
+    ReminderRule,
+    validate,
+)
 from scheduler.schedules import VALID_PERIOD_HOURS
 
 DEFAULT_CONFIG_PATH = Path("config") / "scheduler.toml"
@@ -43,7 +50,44 @@ _DEFAULTS: dict[str, dict[str, object]] = {
     MOODLE_SYNC: {"enabled": True, "interval_hours": 6},
     INGESTION: {"enabled": True, "max_items": 100, "max_seconds": 1800},
     EXTRACTION: {"enabled": True, "max_items": 50, "max_seconds": 1800},
-    NOTIFICATIONS: {"enabled": True, "interval_hours": 1, "due_soon_hours": 24},
+    NOTIFICATIONS: {
+        "enabled": True,
+        # No interval here on purpose: reminders are always checked hourly
+        # (notifications.reminders.CYCLE_HOURS). The cycle and the reminders
+        # are not independent settings - a longer cycle would silently kill
+        # the tightest reminder - so there is one fewer knob and no way to
+        # configure a set that does not actually get delivered.
+        #
+        # The MVP reminder set. Each entry is one reminder; the bands between
+        # them are derived (see notifications.reminders.applicable_rule), so
+        # adding, removing or disabling one needs no code change.
+        "reminders": [
+            {
+                "id": "24h",
+                "offset_hours": 24,
+                "title": "Tarea por vencer mañana: {assignment}",
+                "body": "{course} — vence el {due_date} a las {due_time}. Quedan {remaining}.",
+            },
+            {
+                "id": "12h",
+                "offset_hours": 12,
+                "title": "Tarea por vencer hoy: {assignment}",
+                "body": "{course} — vence a las {due_time}. Quedan {remaining}.",
+            },
+            {
+                "id": "6h",
+                "offset_hours": 6,
+                "title": "Quedan {remaining}: {assignment}",
+                "body": "{course} — vence hoy a las {due_time}.",
+            },
+            {
+                "id": "1h",
+                "offset_hours": 1,
+                "title": "Última hora: {assignment}",
+                "body": "{course} — vence a las {due_time}, en {remaining}.",
+            },
+        ],
+    },
 }
 
 
@@ -67,8 +111,12 @@ class BudgetConfig:
 @dataclass(frozen=True)
 class NotificationsConfig:
     enabled: bool
-    interval_hours: int
-    due_soon_hours: float
+    reminders: tuple[ReminderRule, ...]
+
+    @property
+    def interval_hours(self) -> int:
+        """Fixed, not configured - see reminders.CYCLE_HOURS."""
+        return CYCLE_HOURS
 
 
 @dataclass(frozen=True)
@@ -140,14 +188,23 @@ def load_config(path: str | Path) -> SchedulerConfig:
         extraction=_budget(values, EXTRACTION),
         notifications=NotificationsConfig(
             enabled=_bool(values[NOTIFICATIONS]["enabled"], "notifications.enabled"),
-            interval_hours=_period_hours(
-                values[NOTIFICATIONS]["interval_hours"], "notifications.interval_hours"
-            ),
-            due_soon_hours=_positive(
-                values[NOTIFICATIONS]["due_soon_hours"], "notifications.due_soon_hours"
-            ),
+            reminders=_reminders(values[NOTIFICATIONS]["reminders"]),
         ),
     )
+
+
+# Keys a deployed scheduler.toml may still carry from an earlier version,
+# with what to do about each. deploy/update.sh reinstalls the file when it
+# changes, so these are mostly met on a host with local edits.
+_REMOVED_KEYS = {
+    (NOTIFICATIONS, "due_soon_hours"):
+        "no longer exists: the reminder window is now derived from "
+        "[[notifications.reminders]]. Reinstall deploy/scheduler.toml "
+        "(see docs/deployment.md) and re-apply any local changes.",
+    (NOTIFICATIONS, "interval_hours"):
+        "no longer exists: reminders are always checked hourly, so the cycle "
+        "cannot disagree with the reminders. Remove the line.",
+}
 
 
 def _merge_with_defaults(raw: dict) -> dict[str, dict[str, object]]:
@@ -160,6 +217,11 @@ def _merge_with_defaults(raw: dict) -> dict[str, dict[str, object]]:
         if not isinstance(given, dict):
             raise ConfigError(f"[{section}] must be a table")
         unknown_keys = set(given) - set(defaults)
+        for key in sorted(unknown_keys):
+            # A key that was deliberately removed deserves its own answer: the
+            # generic "unknown key" would send someone hunting for a typo.
+            if (section, key) in _REMOVED_KEYS:
+                raise ConfigError(f"{section}.{key} {_REMOVED_KEYS[(section, key)]}")
         if unknown_keys:
             raise ConfigError(f"unknown key(s) in [{section}]: {', '.join(sorted(unknown_keys))}")
         merged[section] = {**defaults, **given}
@@ -206,6 +268,85 @@ def _number(value: object, key: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ConfigError(f"{key} must be a number")
     return float(value)
+
+
+_REMINDER_KEYS = {"id", "offset_hours", "title", "body", "enabled"}
+# A context with every allowed placeholder, used only to prove at load time
+# that a configured template can actually be rendered.
+_TEMPLATE_PROBE = dict.fromkeys(TEMPLATE_FIELDS, "x")
+
+
+def _reminders(value: object) -> tuple[ReminderRule, ...]:
+    """Build the reminder rules, refusing anything that could not be delivered.
+
+    Validated here rather than at send time: a template with a misspelled
+    placeholder would otherwise fail in the middle of a run, having already
+    sent some of the batch.
+    """
+    if not isinstance(value, list):
+        raise ConfigError("notifications.reminders must be a list of [[notifications.reminders]] entries")
+
+    rules: list[ReminderRule] = []
+    every_id: list[str] = []
+    for index, entry in enumerate(value):
+        where = f"notifications.reminders[{index}]"
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{where} must be a table")
+        unknown = set(entry) - _REMINDER_KEYS
+        if unknown:
+            raise ConfigError(f"unknown key(s) in {where}: {', '.join(sorted(unknown))}")
+        # Note the ordering: a switched-off entry is still checked. Skipping
+        # it would let a broken template sit in the file until someone
+        # enables it, and fail the next startup far from the edit that caused it.
+        is_enabled = _bool(entry.get("enabled", True), f"{where}.enabled")
+
+        rule_id = entry.get("id")
+        if not isinstance(rule_id, str) or not rule_id.strip():
+            raise ConfigError(f"{where}.id must be a non-empty string")
+        offset = entry.get("offset_hours")
+        if isinstance(offset, bool) or not isinstance(offset, (int, float)) or offset <= 0:
+            raise ConfigError(f"{where}.offset_hours must be a positive number of hours")
+
+        templates = {}
+        for field in ("title", "body"):
+            template = entry.get(field)
+            if not isinstance(template, str) or not template.strip():
+                raise ConfigError(f"{where}.{field} must be a non-empty string")
+            try:
+                template.format(**_TEMPLATE_PROBE)
+            except KeyError as exc:
+                raise ConfigError(
+                    f"{where}.{field} uses unknown placeholder {exc}; "
+                    f"available: {', '.join(TEMPLATE_FIELDS)}"
+                ) from None
+            except (IndexError, ValueError) as exc:
+                raise ConfigError(f"{where}.{field} is not a valid template: {exc}") from None
+            templates[field] = template
+
+        every_id.append(rule_id.strip())
+        if is_enabled:
+            rules.append(ReminderRule(
+                id=rule_id.strip(),
+                offset_seconds=int(offset * 3600),
+                title_template=templates["title"],
+                body_template=templates["body"],
+            ))
+
+    duplicates = {name for name in every_id if every_id.count(name) > 1}
+    if duplicates:
+        # Checked across every entry, enabled or not: two entries with one id
+        # are a mistake in the file whichever of them is switched on.
+        raise ConfigError(f"duplicate reminder id(s): {', '.join(sorted(duplicates))}")
+
+    # The same invariant every other caller gets (reminders.validate): offsets
+    # at least an hour apart, templates that render. Enforced here too, or a
+    # 30-minute reminder could be configured in the file and then silently
+    # never delivered - the exact failure the rule set exists to prevent.
+    try:
+        validate(rules)
+    except ReminderError as exc:
+        raise ConfigError(f"notifications.reminders: {exc}") from None
+    return tuple(rules)
 
 
 def _period_hours(value: object, key: str) -> int:

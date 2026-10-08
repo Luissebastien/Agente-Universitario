@@ -10,6 +10,7 @@ from collections.abc import Callable
 from datetime import datetime, timezone
 
 from database import ingestion_repository as ingestion_repo
+from database import reminder_repository as reminder_repo
 from database import scheduler_repository as history
 from database.db import connect
 from extraction.extract import Extraction
@@ -64,7 +65,9 @@ def build_scheduler(
             return Extraction(storage, conn, ocr_engine=DoctrOcrEngine())
     service = NotificationService(
         conn, notification_provider(provider), config.timezone,
-        config.notifications.due_soon_hours,
+        # Resolved per cycle, not captured here: rules the student saved from
+        # any interface take effect on the next run without a restart.
+        lambda: reminder_repo.effective_rules(conn, config.notifications.reminders),
     )
     jobs = {
         MOODLE_SYNC: MoodleSyncJob(conn, client_factory),
@@ -194,10 +197,33 @@ def print_status(config: SchedulerConfig) -> int:
             failure = history.last_execution(conn, job_name, history.STATUS_FAILED)
             if failure is not None:
                 print(f"  last failure: {_local(failure.started_at, tz)}: {failure.error}")
+        _print_reminders(conn, config)
         _print_deferrals(conn, tz)
     finally:
         conn.close()
     return EXIT_OK
+
+
+def _print_reminders(conn: sqlite3.Connection, config: SchedulerConfig) -> None:
+    """The reminder rules actually in force, and where they came from.
+
+    Worth printing even though nothing can change them from outside yet: it
+    is the only way to tell at a glance whether a host is running its
+    configured rules or a set saved through some interface.
+    """
+    stored = reminder_repo.get_rules(conn)
+    rules = reminder_repo.effective_rules(conn, config.notifications.reminders)
+    source = "set by the student" if stored is not None else "from scheduler.toml"
+    print(f"\nReminders ({source}), checked every "
+          f"{config.notifications.interval_hours}h:")
+    if not rules:
+        print("  none: no reminder will be sent")
+        return
+    lower = 0
+    for rule in sorted(rules, key=lambda r: r.offset_seconds):
+        print(f"  [{rule.id}] when between {lower // 3600}h and "
+              f"{rule.offset_seconds // 3600}h remain -> {rule.notification_type}")
+        lower = rule.offset_seconds
 
 
 def _print_deferrals(conn: sqlite3.Connection, tz) -> None:

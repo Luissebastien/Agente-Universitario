@@ -35,8 +35,38 @@ max_seconds = 1800
 [notifications]
 enabled = true
 # Reminders run on their own clock schedule, independent of the Moodle sync
-# chain: hourly means 00:00, 01:00, 02:00 ... in the configured timezone.
-# The period must divide 24 evenly, and must not be longer than the narrowest
-# reminder window, or that window can fall between two runs and be missed.
-interval_hours = 1
-due_soon_hours = 24
+# chain: every hour on the hour, in the configured timezone. The cycle is not
+# configurable - it and the reminders below are not independent settings, so
+# pinning it removes any way to configure reminders that never get delivered.
+# The floor it sets: reminders must be at least 1 hour apart.
+
+# One entry per reminder. The bands between them are derived, so removing the
+# 12h entry simply widens the 24h one to cover (6h, 24h]; no code changes.
+# Each reminder is delivered at most once per assignment and deadline, and a
+# deadline the professor moves starts a fresh series.
+# Placeholders: {assignment} {course} {due} {due_date} {due_time} {remaining} {tz}
+# Add enabled = false to keep an entry without delivering it.
+
+[[notifications.reminders]]
+id = "24h"
+offset_hours = 24
+title = "Tarea por vencer mañana: {assignment}"
+body = "{course} — vence el {due_date} a las {due_time}. Quedan {remaining}."
+
+[[notifications.reminders]]
+id = "12h"
+offset_hours = 12
+title = "Tarea por vencer hoy: {assignment}"
+body = "{course} — vence a las {due_time}. Quedan {remaining}."
+
+[[notifications.reminders]]
+id = "6h"
+offset_hours = 6
+title = "Quedan {remaining}: {assignment}"
+body = "{course} — vence hoy a las {due_time}."
+
+[[notifications.reminders]]
+id = "1h"
+offset_hours = 1
+title = "Última hora: {assignment}"
+body = "{course} — vence a las {due_time}, en {remaining}."

@@ -2,17 +2,19 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone, tzinfo
 
 from database import notification_repository as repo
-from notifications.models import (
-    NOTIFICATION_ASSIGNMENT_DUE_SOON,
-    NOTIFICATION_JOB_FAILED,
-    Notification,
-)
+from notifications.models import NOTIFICATION_JOB_FAILED, Notification
 from notifications.providers import NotificationProvider
+from notifications.reminders import (
+    ReminderRule,
+    applicable_rule,
+    describe_remaining,
+    render,
+)
 from read_model import AcademicReadModel, is_assignment_pending
 
 logger = logging.getLogger(__name__)
@@ -29,11 +31,14 @@ class NotificationBatchResult:
 class NotificationService:
     """WHAT to notify and WHY - deterministic rules over the Read Model only.
 
-    No LLM, no inference. The single MVP rule ('assignment_due_soon'): an
-    assignment confirmed by the latest successful Moodle sync, that the Read
-    Model considers pending (real future due date, known and not submitted -
-    DEC-062), and is due within `due_soon_hours`. Each (type, assignment,
-    deadline) is notified once.
+    No LLM, no inference. An assignment produces a reminder when it is
+    confirmed by the latest successful Moodle sync, the Read Model considers
+    it pending (real future due date, known and not submitted - DEC-062), and
+    the time left has reached one of the configured reminder bands.
+
+    A deadline can therefore produce several reminders, each at most once:
+    the stored identity is (rule, assignment, deadline), so a rule fires once
+    per deadline, and a deadline the professor moves starts a fresh series.
     """
 
     def __init__(
@@ -41,13 +46,20 @@ class NotificationService:
         conn: sqlite3.Connection,
         provider: NotificationProvider,
         tz: tzinfo,
-        due_soon_hours: float,
+        rules_source: Callable[[], Sequence[ReminderRule]],
         clock: Callable[[], datetime] | None = None,
     ) -> None:
+        """`rules_source` is asked on every evaluation, not once here.
+
+        That is deliberate: it is what lets the student's rules change while
+        the process is running - a setting saved from any interface takes
+        effect on the next cycle, with no restart. A caller with a fixed set
+        passes `lambda: rules`.
+        """
         self._conn = conn
         self._provider = provider
         self._tz = tz
-        self._due_soon_seconds = int(due_soon_hours * 3600)
+        self._rules_source = rules_source
         self._clock = clock or (lambda: datetime.now(tz))
 
     def pending(self, confirmed_since: str | None) -> list[Notification]:
@@ -61,9 +73,15 @@ class NotificationService:
         """
         if confirmed_since is None:
             return []
+        rules = tuple(self._rules_source())
+        if not rules:
+            return []
         confirmed = datetime.fromisoformat(confirmed_since)
         now = int(self._clock().timestamp())
-        horizon = now + self._due_soon_seconds
+        # Nothing is looked at beyond the widest reminder. Derived from the
+        # rules in force rather than configured separately, so the horizon and
+        # the reminders can never disagree.
+        horizon = now + max(rule.offset_seconds for rule in rules)
         read_model = AcademicReadModel(self._conn)
 
         notifications: list[Notification] = []
@@ -76,25 +94,38 @@ class NotificationService:
                 continue
             if assignment.duedate > horizon:
                 continue
+            rule = applicable_rule(rules, assignment.duedate - now)
+            if rule is None:
+                continue
             scheduled_for = datetime.fromtimestamp(assignment.duedate, timezone.utc).isoformat()
             subject_key = f"assignment:{assignment.id}"
-            if repo.was_sent(self._conn, NOTIFICATION_ASSIGNMENT_DUE_SOON, subject_key, scheduled_for):
+            if repo.was_sent(self._conn, rule.notification_type, subject_key, scheduled_for):
                 continue
             course = read_model.get_course(assignment.course_id)
-            local_due = datetime.fromtimestamp(assignment.duedate, self._tz)
+            context = self._context(assignment, course, assignment.duedate - now)
             notifications.append(
                 Notification(
-                    notification_type=NOTIFICATION_ASSIGNMENT_DUE_SOON,
+                    notification_type=rule.notification_type,
                     subject_key=subject_key,
                     scheduled_for=scheduled_for,
-                    title=f"Tarea por vencer: {assignment.name}",
-                    body=(
-                        f"{course.fullname if course else f'Curso {assignment.course_id}'} - "
-                        f"vence el {local_due:%Y-%m-%d %H:%M} ({self._tz_name()})"
-                    ),
+                    title=render(rule.title_template, context),
+                    body=render(rule.body_template, context),
                 )
             )
         return notifications
+
+    def _context(self, assignment, course, remaining_seconds: float) -> dict[str, str]:
+        """The values a reminder template may use. See TEMPLATE_FIELDS."""
+        local_due = datetime.fromtimestamp(assignment.duedate, self._tz)
+        return {
+            "assignment": assignment.name,
+            "course": course.fullname if course else f"Curso {assignment.course_id}",
+            "due": f"{local_due:%Y-%m-%d %H:%M}",
+            "due_date": f"{local_due:%Y-%m-%d}",
+            "due_time": f"{local_due:%H:%M}",
+            "remaining": describe_remaining(remaining_seconds),
+            "tz": self._tz_name(),
+        }
 
     def send_pending(self, confirmed_since: str | None) -> NotificationBatchResult:
         """Send every pending reminder, then record it (at-least-once: a send

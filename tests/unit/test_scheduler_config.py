@@ -45,7 +45,102 @@ class LoadConfigTests(ConfigTestCase):
         self.assertFalse(config.allow_manual_disabled_jobs)
         self.assertGreater(config.ingestion.max_items, 0)
         self.assertGreater(config.extraction.max_seconds, 0)
-        self.assertEqual(config.notifications.due_soon_hours, 24)
+        self.assertEqual([r.id for r in config.notifications.reminders],
+                         ["24h", "12h", "6h", "1h"])
+
+    def test_the_repository_config_declares_the_same_reminders_as_the_defaults(self) -> None:
+        # The shipped file and the built-in defaults must not drift apart:
+        # a reminder added to one and not the other is invisible until it
+        # fails to arrive.
+        from scheduler.config import load_config as load
+        shipped = load(REPO_CONFIG).notifications.reminders
+        defaults = load(self.write("")).notifications.reminders
+        self.assertEqual([(r.id, r.offset_seconds) for r in shipped],
+                         [(r.id, r.offset_seconds) for r in defaults])
+
+    def test_a_reminder_can_be_switched_off_without_removing_it(self) -> None:
+        config = load_config(self.write(
+            "[[notifications.reminders]]\n"
+            'id = "solo"\n'
+            "offset_hours = 3\n"
+            'title = "t"\n'
+            'body = "b"\n'
+            "\n"
+            "[[notifications.reminders]]\n"
+            'id = "apagado"\n'
+            "offset_hours = 1\n"
+            "enabled = false\n"
+            'title = "t"\n'
+            'body = "b"\n'
+        ))
+        self.assertEqual([r.id for r in config.notifications.reminders], ["solo"])
+
+    def test_the_file_cannot_configure_a_reminder_that_would_never_be_sent(self) -> None:
+        # Regression: the hourly floor was enforced when an interface saved
+        # rules, but not when the file declared them - so a 30-minute reminder
+        # could be configured here and then silently never delivered.
+        half_hour = (
+            '[[notifications.reminders]]\nid = "30m"\noffset_hours = 0.5\n'
+            'title = "t"\nbody = "b"\n'
+        )
+        narrow_gap = (
+            '[[notifications.reminders]]\nid = "a"\noffset_hours = 24\ntitle = "t"\nbody = "b"\n'
+            '[[notifications.reminders]]\nid = "b"\noffset_hours = 23.5\ntitle = "t"\nbody = "b"\n'
+        )
+        for text in (half_hour, narrow_gap):
+            with self.subTest(text=text), self.assertRaises(ConfigError) as raised:
+                load_config(self.write(text))
+            self.assertIn("30 minutes", str(raised.exception))
+
+    def test_a_switched_off_entry_is_still_checked(self) -> None:
+        # Regression: a disabled entry was skipped before validation, so a
+        # broken template waited there until someone enabled it and then
+        # failed a startup far from the edit that caused it.
+        with self.assertRaises(ConfigError) as raised:
+            load_config(self.write(
+                '[[notifications.reminders]]\nid = "x"\noffset_hours = 2\n'
+                'enabled = false\ntitle = "{materia}"\nbody = "b"\n'
+            ))
+        self.assertIn("materia", str(raised.exception))
+
+    def test_a_duplicate_id_counts_even_when_one_is_switched_off(self) -> None:
+        with self.assertRaises(ConfigError) as raised:
+            load_config(self.write(
+                '[[notifications.reminders]]\nid = "a"\noffset_hours = 6\ntitle = "t"\nbody = "b"\n'
+                '[[notifications.reminders]]\nid = "a"\noffset_hours = 2\nenabled = false\n'
+                'title = "t"\nbody = "b"\n'
+            ))
+        self.assertIn("duplicate reminder id", str(raised.exception))
+
+    def test_a_template_with_an_unknown_placeholder_is_rejected_at_load(self) -> None:
+        with self.assertRaises(ConfigError) as raised:
+            load_config(self.write(
+                "[[notifications.reminders]]\n"
+                'id = "x"\n'
+                "offset_hours = 1\n"
+                'title = "{materia}"\n'
+                'body = "b"\n'
+            ))
+        self.assertIn("materia", str(raised.exception))
+
+    def test_reminders_that_would_collide_are_rejected(self) -> None:
+        duplicate_id = (
+            '[[notifications.reminders]]\nid = "x"\noffset_hours = 2\ntitle = "t"\nbody = "b"\n'
+            '[[notifications.reminders]]\nid = "x"\noffset_hours = 1\ntitle = "t"\nbody = "b"\n'
+        )
+        same_offset = (
+            '[[notifications.reminders]]\nid = "a"\noffset_hours = 2\ntitle = "t"\nbody = "b"\n'
+            '[[notifications.reminders]]\nid = "b"\noffset_hours = 2\ntitle = "t"\nbody = "b"\n'
+        )
+        for text in (duplicate_id, same_offset):
+            with self.subTest(text=text), self.assertRaises(ConfigError):
+                load_config(self.write(text))
+
+    def test_the_old_single_threshold_key_explains_itself(self) -> None:
+        # A scheduler.toml deployed before the reminder rules.
+        with self.assertRaises(ConfigError) as raised:
+            load_config(self.write("[notifications]\ndue_soon_hours = 24\n"))
+        self.assertIn("reminders", str(raised.exception))
 
     def test_values_are_read(self) -> None:
         config = load_config(self.write(
@@ -90,8 +185,16 @@ class LoadConfigTests(ConfigTestCase):
 
     def test_every_period_that_divides_the_day_is_accepted(self) -> None:
         for hours in (1, 2, 3, 4, 6, 8, 12, 24):
-            config = load_config(self.write(f"[notifications]\ninterval_hours = {hours}\n"))
-            self.assertEqual(config.notifications.interval_hours, hours)
+            config = load_config(self.write(f"[moodle_sync]\ninterval_hours = {hours}\n"))
+            self.assertEqual(config.moodle_sync.interval_hours, hours)
+
+    def test_the_notification_cycle_is_fixed_and_cannot_be_configured(self) -> None:
+        # Pinned so it can never disagree with the reminders it must deliver.
+        self.assertEqual(load_config(self.write("")).notifications.interval_hours, 1)
+
+        with self.assertRaises(ConfigError) as raised:
+            load_config(self.write("[notifications]\ninterval_hours = 2\n"))
+        self.assertIn("always checked hourly", str(raised.exception))
 
     def test_schedules_cover_exactly_the_jobs_that_have_a_clock_grid(self) -> None:
         config = load_config(self.write(""))
