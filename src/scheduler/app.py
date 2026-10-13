@@ -218,18 +218,15 @@ def run_purge(config: SchedulerConfig, *, confirmed: bool) -> int:
     if not config.database_path.exists():
         print("No database to purge.", file=sys.stderr)
         return EXIT_UNAVAILABLE
-    if is_locked(config.lock_path):
-        # Purging under a live writer could delete rows a job is mid-way
-        # through using, and would leave its downloads orphaned.
-        print("A scheduler process is running. Stop it first "
-              "(sudo systemctl stop agente-u), then run this again.", file=sys.stderr)
-        return EXIT_UNAVAILABLE
 
+    running = is_locked(config.lock_path)
     conn = connect(config.database_path)
     try:
         counts = purge_module.count_academic_rows(conn)
         total = sum(counts.values())
         if not confirmed:
+            # Reporting is read-only, so it runs with the scheduler up. Only
+            # the deletion below needs the process stopped.
             print("This deletes ALL academic data: courses, assignments, grades, "
                   "calendar, materials and every downloaded original.\n")
             for table, count in counts.items():
@@ -239,8 +236,18 @@ def run_purge(config: SchedulerConfig, *, confirmed: bool) -> int:
             print(f"\nKept: {', '.join(purge_module.KEPT_TABLES)}")
             print("\nA backup is written first. The next startup re-syncs "
                   "everything Moodle still has.")
+            if running:
+                print("\nThe scheduler is running, so these counts may shift; "
+                      "it must be stopped before the purge itself.")
             print("\nNothing was deleted. Re-run with --yes to proceed.")
             return EXIT_OK
+
+        if running:
+            # Deleting under a live writer could remove rows a job is mid-way
+            # through using, and would orphan whatever it just downloaded.
+            print("A scheduler process is running. Stop it first "
+                  "(sudo systemctl stop agente-u), then run this again.", file=sys.stderr)
+            return EXIT_UNAVAILABLE
 
         report = purge_module.purge(
             conn, config.storage_path, config.database_path.parent

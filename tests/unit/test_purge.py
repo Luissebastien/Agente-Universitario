@@ -158,7 +158,7 @@ class PurgeCommandTests(unittest.TestCase):
 
         self.assertEqual(self.courses(), 0)
 
-    def test_it_refuses_while_a_scheduler_is_running(self) -> None:
+    def test_it_refuses_to_delete_while_a_scheduler_is_running(self) -> None:
         from scheduler.lock import SingleInstanceLock
         lock = SingleInstanceLock(self.config.lock_path)
         self.assertTrue(lock.try_acquire())
@@ -169,6 +169,21 @@ class PurgeCommandTests(unittest.TestCase):
 
         self.assertEqual(result, EXIT_UNAVAILABLE)
         self.assertEqual(self.courses(), 1)  # untouched
+
+    def test_it_still_reports_while_a_scheduler_is_running(self) -> None:
+        # Regression: the lock guard sat before the dry-run branch, so merely
+        # asking what would be deleted required stopping the service. Counting
+        # rows is read-only; only the deletion needs the process down.
+        from scheduler.lock import SingleInstanceLock
+        lock = SingleInstanceLock(self.config.lock_path)
+        self.assertTrue(lock.try_acquire())
+        try:
+            result = run_purge(self.config, confirmed=False)
+        finally:
+            lock.release()
+
+        self.assertEqual(result, EXIT_OK)
+        self.assertEqual(self.courses(), 1)
 
     def test_it_refuses_when_there_is_no_database(self) -> None:
         self.config.database_path.unlink()
