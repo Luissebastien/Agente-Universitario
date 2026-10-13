@@ -409,6 +409,83 @@ copia de seguridad diaria**. Es append-only por diseño (DEC-038).
 
 ---
 
+## Cerrar un trimestre
+
+Agente U **nunca borra datos por su cuenta**: todo lo que sincroniza se queda
+hasta que tú lo quites. Al acabar un trimestre, el material de asignaturas que
+ya no cursas sigue ocupando disco y, sobre todo, sigue siendo información
+personal almacenada sin necesitarla.
+
+El cierre tiene dos partes, y **el orden importa**.
+
+### 1. Archiva lo que quieras conservar
+
+El purgador **no archiva nada**. Los originales se guardan direccionados por
+contenido (`<sha256>` como nombre), así que una copia útil tiene que
+reconstruir los nombres y la estructura del curso — y eso se hace donde vaya a
+vivir el archivo, no en la máquina que se está vaciando.
+
+Si quieres conservarlo, hazlo **antes** de purgar.
+
+### 2. Purga
+
+```sh
+sudo systemctl stop agente-u
+```
+
+Primero mira qué se borraría. Sin `--yes` no toca nada:
+
+```sh
+sudo -u agente-u /opt/agente-u/.venv/bin/python -m scheduler     --config /etc/agente-u/scheduler.toml --purge
+```
+
+Y cuando estés conforme:
+
+```sh
+sudo -u agente-u /opt/agente-u/.venv/bin/python -m scheduler     --config /etc/agente-u/scheduler.toml --purge --yes
+```
+
+```sh
+sudo systemctl start agente-u
+```
+
+El primer ciclo tras arrancar es una sincronización completa, que reconstruye
+el trimestre nuevo desde Moodle.
+
+### Qué borra y qué no
+
+| Se borra | Se conserva |
+|---|---|
+| Cursos, secciones, módulos, archivos | Historial de ejecuciones (`scheduler_executions`) |
+| Tareas, estados de entrega, notas | Tus reglas de recordatorio |
+| Eventos de calendario | Registro de avisos ya enviados |
+| Recursos, versiones y extracciones | |
+| Perfil de usuario de Moodle | |
+| **Todos los originales descargados** | |
+
+Se conserva el registro de avisos enviados a propósito: borrarlo haría que un
+purgado a destiempo te reanunciara entregas que sobreviven a la purga.
+
+### Las tres guardas
+
+El comando se niega a actuar si **el scheduler está corriendo** —purgar bajo un
+proceso que escribe dejaría descargas huérfanas—, exige `--yes` de forma
+explícita, y **escribe un backup antes de borrar nada**. Si el backup falla, no
+borra.
+
+El backup queda junto a la base, con marca de tiempo:
+
+```sh
+sudo ls -lh /var/lib/agente-u/agente_u-before-purge-*.sqlite3
+```
+
+Para deshacer una purga, ese archivo es la base de antes: párala, cópiala
+encima y arranca. Los **originales descargados no están en ese backup** — se
+vuelven a bajar de Moodle en el siguiente ciclo, mientras el curso siga
+existiendo.
+
+---
+
 ## Copias de seguridad
 
 Se hacen solas cada día a las 04:30 mediante `agente-u-backup.timer`.
@@ -435,6 +512,56 @@ sudo -u agente-u sh -c 'gunzip -c /var/backups/agente-u/agente_u-<fecha>.sqlite3
     > /var/lib/agente-u/agente_u.sqlite3'
 sudo systemctl start agente-u
 ```
+
+---
+
+## Verificar contra Moodle real
+
+La suite normal no toca la red: los 11 tests de integración se saltan salvo
+que les des credenciales. Es deliberado — CI no debe llamar a tu universidad
+ni guardar tu token —, pero significa que **el camino real contra Moodle solo
+se ejercita cuando lo pides**.
+
+Son de **solo lectura** contra Moodle, y cada uno escribe en un directorio
+temporal: nunca tocan la base de producción ni el repositorio.
+
+```sh
+MOODLE_RUN_INTEGRATION_TESTS=1 MOODLE_URL=https://campusvirtual.example.edu MOODLE_TOKEN=<tu-token>     python -m unittest discover -s tests/integration -t .
+```
+
+En PowerShell:
+
+```powershell
+$env:MOODLE_RUN_INTEGRATION_TESTS=1
+$env:MOODLE_URL="https://campusvirtual.example.edu"
+$env:MOODLE_TOKEN="<tu-token>"
+python -m unittest discover -s tests/integration -t .
+```
+
+Qué cubren, y por qué conviene correrlos tras tocar el cliente de Moodle, la
+ingestión o la extracción:
+
+| Test | Qué demuestra |
+|---|---|
+| `test_moodle_client_smoke` | autenticación, listado de cursos y **una descarga real** |
+| `test_moodle_sync_smoke` | perfil, cursos, tareas, estado de entrega, notas, calendario |
+| `test_ingestion_smoke` | descubrimiento, descarga, hash y versiones, idempotente |
+| `test_read_model_smoke` | las consultas del Read Model contra datos reales |
+| `test_scheduler_smoke` | un ciclo de arranque y uno incremental, completos |
+
+Los de OCR van aparte, con `RUN_OCR_INTEGRATION_TESTS=1`: descargan los pesos
+del modelo y tardan bastante, así que no los mezcles con lo anterior salvo que
+estés tocando OCR.
+
+### Cuándo importa de verdad
+
+Un doble de test no puede decirte si **Moodle responde como esperas**. Por
+ejemplo, la comprobación de descargas truncadas compara el `Content-Length`
+declarado con los bytes recibidos: si tu Moodle no enviara esa cabecera, o la
+enviara de otra forma, solo lo descubrirías aquí.
+
+Última ejecución completa: **2026-10-12**, 7 tests, todos OK — 0 fallos de
+descarga sobre 3 ficheros reales en el ciclo del scheduler.
 
 ---
 

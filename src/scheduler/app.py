@@ -35,6 +35,7 @@ from scheduler.jobs import (
     MoodleSyncJob,
     NotificationJob,
 )
+from scheduler import purge as purge_module
 from scheduler.lock import SingleInstanceLock, is_locked
 from scheduler.redaction import SecretRedactingFilter
 from scheduler.scheduler import RequestResult, Scheduler
@@ -204,6 +205,54 @@ def print_status(config: SchedulerConfig) -> int:
         _print_deferrals(conn, tz)
     finally:
         conn.close()
+    return EXIT_OK
+
+
+def run_purge(config: SchedulerConfig, *, confirmed: bool) -> int:
+    """Delete every academic row and stored original, after backing up.
+
+    Three guards, in order, because this is the only destructive command in
+    the system: the scheduler must not be running, the operator must have said
+    so explicitly, and a backup must succeed before anything is deleted.
+    """
+    if not config.database_path.exists():
+        print("No database to purge.", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    if is_locked(config.lock_path):
+        # Purging under a live writer could delete rows a job is mid-way
+        # through using, and would leave its downloads orphaned.
+        print("A scheduler process is running. Stop it first "
+              "(sudo systemctl stop agente-u), then run this again.", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+
+    conn = connect(config.database_path)
+    try:
+        counts = purge_module.count_academic_rows(conn)
+        total = sum(counts.values())
+        if not confirmed:
+            print("This deletes ALL academic data: courses, assignments, grades, "
+                  "calendar, materials and every downloaded original.\n")
+            for table, count in counts.items():
+                if count:
+                    print(f"  {table:32} {count:>7} row(s)")
+            print(f"\n  {'total':32} {total:>7} row(s)")
+            print(f"\nKept: {', '.join(purge_module.KEPT_TABLES)}")
+            print("\nA backup is written first. The next startup re-syncs "
+                  "everything Moodle still has.")
+            print("\nNothing was deleted. Re-run with --yes to proceed.")
+            return EXIT_OK
+
+        report = purge_module.purge(
+            conn, config.storage_path, config.database_path.parent
+        )
+    finally:
+        conn.close()
+
+    print(f"Backup written: {report.backup_path}")
+    print(f"Deleted {report.total_rows} row(s) across {len(report.rows_by_table)} table(s)")
+    print(f"Removed {report.originals_removed} stored original(s), "
+          f"{report.bytes_freed / 1048576:.1f} MB freed")
+    print("\nStart the scheduler when ready; its first run is a full sync.")
     return EXIT_OK
 
 
