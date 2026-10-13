@@ -311,17 +311,39 @@ class MoodleClient:
                 # never read into memory at all. MoodleResourceTooLargeError is
                 # a MoodleError, not an OSError/ValueError/HTTPException, so it
                 # passes through the handlers below untouched.
+                declared_size: int | None = None
                 declared = response.headers.get("Content-Length")
                 if isinstance(declared, str) and declared.strip().isdigit():
-                    size = int(declared.strip())
-                    if size > self._max_resource_bytes:
-                        raise MoodleResourceTooLargeError(size, self._max_resource_bytes)
+                    declared_size = int(declared.strip())
+                    if declared_size > self._max_resource_bytes:
+                        raise MoodleResourceTooLargeError(declared_size, self._max_resource_bytes)
                 # No (or unusable) Content-Length: read one byte past the limit
                 # and refuse if it is reached, so a body that lies about its
                 # size is still bounded.
                 data = response.read(self._max_resource_bytes + 1)
                 if len(data) > self._max_resource_bytes:
                     raise MoodleResourceTooLargeError(None, self._max_resource_bytes)
+                # A short read is not an error to http.client when a length is
+                # passed to read(), so a connection cut mid-body would other-
+                # wise become a perfectly ordinary-looking version: hashed,
+                # stored, extracted, and never fetched again, because Moodle's
+                # timemodified did not change. Compared only when the server
+                # did not encode the body, where Content-Length describes the
+                # encoded bytes rather than these.
+                encoded = response.headers.get("Content-Encoding")
+                if declared_size is not None and not encoded and len(data) != declared_size:
+                    raise MoodleConnectionError(
+                        f"Truncated download ({len(data)} of {declared_size} bytes): "
+                        f"{_redact_url(file_url)}"
+                    )
+                # An empty body with no declared length is indistinguishable
+                # from a failed transfer, so it is treated as one. A file
+                # Moodle genuinely serves as empty says Content-Length: 0 and
+                # is accepted by the check above.
+                if declared_size is None and not data:
+                    raise MoodleConnectionError(
+                        f"Empty download with no declared length: {_redact_url(file_url)}"
+                    )
         except urllib.error.HTTPError as exc:
             raise MoodleHTTPError(exc.code) from None
         except (urllib.error.URLError, OSError) as exc:

@@ -65,6 +65,59 @@ class HtmlExtractorTests(unittest.TestCase):
         with self.assertRaises(UnicodeDecodeError):
             self.extractor.extract(b"\xff\xfe\x00\x01")
 
+    # -- alt text ---------------------------------------------------------
+    # A Moodle page written in the editor is often nothing but images, and
+    # then alt carries the only words a person wrote. These reproduce the
+    # real resources that extracted to nothing in production.
+
+    def test_image_alt_text_is_extracted(self) -> None:
+        html = (
+            b'<div class="no-overflow"><p><strong><img class="img-fluid" '
+            b'src="GDS_QueHaremosSemana.png" alt="Guia semanal de Actividades" '
+            b'width="99%"></strong></p></div>'
+        )
+        result = self.extractor.extract(html)
+
+        self.assertEqual(result.text, "Guia semanal de Actividades")
+        self.assertEqual(result.metadata["attribute_chunks"], 1)
+
+    def test_alt_text_is_combined_with_the_surrounding_prose_in_order(self) -> None:
+        html = b'<p>Antes</p><img src="x.png" alt="La figura"><p>Despues</p>'
+        result = self.extractor.extract(html)
+
+        self.assertEqual(result.text, "Antes\nLa figura\nDespues")
+
+    def test_decorative_alt_adds_nothing(self) -> None:
+        html = b'<p><img src="linea.png" alt=""><img src="x.png" alt="   "></p>'
+        result = self.extractor.extract(html)
+
+        self.assertEqual(result.text, "")
+        self.assertEqual(result.metadata["attribute_chunks"], 0)
+
+    def test_only_alt_is_read_not_other_attributes(self) -> None:
+        # title on the real corpus was boilerplate ("YouTube video player"),
+        # so a page that is only an embed still extracts to nothing.
+        html = (
+            b'<div class="no-overflow"><p><iframe title="YouTube video player" '
+            b'src="https://www.youtube.com/embed/aLJMEfv1JME" width="560"></iframe></p></div>'
+        )
+        result = self.extractor.extract(html)
+
+        self.assertEqual(result.text, "")
+
+    def test_alt_inside_skipped_markup_is_ignored(self) -> None:
+        html = b'<script><img src="x.png" alt="no debe salir"></script><p>Si</p>'
+        result = self.extractor.extract(html)
+
+        self.assertEqual(result.text, "Si")
+
+    def test_prose_pages_are_unaffected(self) -> None:
+        html = b"<html><body><h1>Tema 1</h1><p>Contenido real.</p></body></html>"
+        result = self.extractor.extract(html)
+
+        self.assertEqual(result.text, "Tema 1\nContenido real.")
+        self.assertEqual(result.metadata["attribute_chunks"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

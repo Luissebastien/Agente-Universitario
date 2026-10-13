@@ -447,5 +447,102 @@ class DownloadFileHostRestrictionTests(unittest.TestCase):
         mock_urlopen.assert_not_called()
 
 
+class _Body:
+    """A download response with real headers, unlike a bare MagicMock."""
+
+    def __init__(self, body: bytes, headers: dict | None = None) -> None:
+        self._body = body
+        self.headers = headers or {}
+
+    def read(self, amt: int | None = None) -> bytes:
+        return self._body if amt is None else self._body[:amt]
+
+
+class TruncatedAndEmptyDownloadTests(unittest.TestCase):
+    """A short read is not an error to http.client when read() is given a
+    length, so a cut connection would otherwise be stored as a complete
+    version and never fetched again - Moodle's timemodified would not change.
+    """
+
+    TOKEN = "0123456789abcdef0123456789abcdef"
+
+    def client(self) -> MoodleClient:
+        return MoodleClient("https://moodle.example.edu", self.TOKEN)
+
+    def download(self, mock_urlopen, body: bytes, headers: dict | None = None) -> bytes:
+        mock_urlopen.return_value.__enter__.return_value = _Body(body, headers)
+        return self.client().download_file(
+            "https://moodle.example.edu/webservice/pluginfile.php/1/a.pdf"
+        )
+
+    @patch("moodle.client.urllib.request.urlopen")
+    def test_a_body_shorter_than_content_length_is_refused(self, mock_urlopen: MagicMock) -> None:
+        with self.assertRaises(MoodleConnectionError) as raised:
+            self.download(mock_urlopen, b"half", {"Content-Length": "100"})
+
+        self.assertIn("Truncated", str(raised.exception))
+        self.assertIn("4 of 100", str(raised.exception))
+
+    @patch("moodle.client.urllib.request.urlopen")
+    def test_a_truncation_error_does_not_leak_the_token(self, mock_urlopen: MagicMock) -> None:
+        # The message quotes the URL as the caller gave it, never the
+        # authenticated one the token is appended to.
+        with self.assertRaises(MoodleConnectionError) as raised:
+            self.download(mock_urlopen, b"half", {"Content-Length": "100"})
+
+        self.assertNotIn(self.TOKEN, str(raised.exception))
+
+    @patch("moodle.client.urllib.request.urlopen")
+    def test_a_truncation_error_redacts_a_token_already_in_the_url(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        mock_urlopen.return_value.__enter__.return_value = _Body(b"half", {"Content-Length": "100"})
+        with self.assertRaises(MoodleConnectionError) as raised:
+            self.client().download_file(
+                f"https://moodle.example.edu/webservice/pluginfile.php/1/a.pdf?token={self.TOKEN}"
+            )
+
+        # _redact_url rebuilds the query, so the placeholder comes back
+        # percent-encoded. Ugly, but the token is gone, which is the point.
+        self.assertNotIn(self.TOKEN, str(raised.exception))
+        self.assertNotIn("token=0", str(raised.exception))
+
+    @patch("moodle.client.urllib.request.urlopen")
+    def test_a_complete_body_is_accepted(self, mock_urlopen: MagicMock) -> None:
+        data = self.download(mock_urlopen, b"exactly ten", {"Content-Length": "11"})
+
+        self.assertEqual(data, b"exactly ten")
+
+    @patch("moodle.client.urllib.request.urlopen")
+    def test_an_encoded_body_is_not_compared_against_content_length(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        # Content-Length describes the compressed bytes, not these, so a
+        # mismatch there says nothing about truncation.
+        data = self.download(
+            mock_urlopen, b"decompressed and longer",
+            {"Content-Length": "9", "Content-Encoding": "gzip"},
+        )
+
+        self.assertEqual(data, b"decompressed and longer")
+
+    @patch("moodle.client.urllib.request.urlopen")
+    def test_an_empty_body_with_no_declared_length_is_refused(
+        self, mock_urlopen: MagicMock
+    ) -> None:
+        # Indistinguishable from a failed transfer, and accepting it would
+        # store a 0-byte version that extracts to nothing and looks fine.
+        with self.assertRaises(MoodleConnectionError) as raised:
+            self.download(mock_urlopen, b"", {})
+
+        self.assertIn("Empty download", str(raised.exception))
+
+    @patch("moodle.client.urllib.request.urlopen")
+    def test_a_file_moodle_declares_as_empty_is_accepted(self, mock_urlopen: MagicMock) -> None:
+        # Content-Length: 0 is Moodle stating the file really is empty.
+        self.assertEqual(self.download(mock_urlopen, b"", {"Content-Length": "0"}), b"")
+
+
 if __name__ == "__main__":
+
     unittest.main()

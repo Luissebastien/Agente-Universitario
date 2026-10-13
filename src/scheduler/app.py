@@ -73,7 +73,10 @@ def build_scheduler(
         MOODLE_SYNC: MoodleSyncJob(conn, client_factory),
         INGESTION: IngestionJob(conn, storage, client_factory, config.ingestion),
         EXTRACTION: ExtractionJob(extraction_factory, config.extraction),
-        NOTIFICATIONS: NotificationJob(conn, service),
+        # The client is for one thing only: re-reading the submission status
+        # of an assignment just before reminding about it, since reminders run
+        # far more often than the sync that would otherwise refresh it.
+        NOTIFICATIONS: NotificationJob(conn, service, client_factory),
     }
     return Scheduler(conn, jobs, config, on_job_failed=service.notify_job_failure)
 

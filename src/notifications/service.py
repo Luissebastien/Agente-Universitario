@@ -7,7 +7,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone, tzinfo
 
 from database import notification_repository as repo
-from notifications.models import NOTIFICATION_JOB_FAILED, Notification
+from notifications.models import (
+    NOTIFICATION_JOB_FAILED,
+    Notification,
+    assignment_subject_key,
+)
 from notifications.providers import NotificationProvider
 from notifications.reminders import (
     ReminderRule,
@@ -98,7 +102,7 @@ class NotificationService:
             if rule is None:
                 continue
             scheduled_for = datetime.fromtimestamp(assignment.duedate, timezone.utc).isoformat()
-            subject_key = f"assignment:{assignment.id}"
+            subject_key = assignment_subject_key(assignment.id)
             if repo.was_sent(self._conn, rule.notification_type, subject_key, scheduled_for):
                 continue
             course = read_model.get_course(assignment.course_id)

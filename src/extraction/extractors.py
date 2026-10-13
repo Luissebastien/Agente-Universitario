@@ -118,11 +118,27 @@ class _VisibleTextHTMLParser(HTMLParser):
         self._chunks: list[str] = []
         self._skip_depth = 0
         self.tag_count = 0
+        self.attribute_chunks = 0
 
     def handle_starttag(self, tag: str, attrs) -> None:
         self.tag_count += 1
         if tag in _SKIP_TAGS:
             self._skip_depth += 1
+            return
+        if self._skip_depth:
+            return
+        # An image's alt text is written by a person and is often the only
+        # prose on a page built out of pictures - which is what a Moodle page
+        # made in the editor usually is. Measured on the real corpus: twelve
+        # resources whose entire HTML is <img> tags, where alt carries the one
+        # human-written description ("Guia semanal de Actividades").
+        #
+        # Only alt, deliberately. 'title' on the same corpus was boilerplate
+        # ("YouTube video player"), so it would add noise, not meaning.
+        for name, value in attrs:
+            if name == "alt" and value and value.strip():
+                self._chunks.append(value.strip())
+                self.attribute_chunks += 1
 
     def handle_endtag(self, tag: str) -> None:
         if tag in _SKIP_TAGS and self._skip_depth > 0:
@@ -146,7 +162,11 @@ class HtmlExtractor(Extractor):
     """
 
     name = "html_text"
-    version = "1"
+    # 2: reads image alt text as well as text nodes. Bumped so a stored
+    # document says which behaviour produced it; it does not cause anything to
+    # be re-extracted, because pending detection looks at whether a version has
+    # a 'done' attempt, never at which version of the extractor made it.
+    version = "2"
 
     def supports(self, mimetype: str | None, extension: str) -> bool:
         return mimetype in _HTML_MIMETYPES or extension in _HTML_EXTENSIONS
@@ -162,6 +182,10 @@ class HtmlExtractor(Extractor):
                 "char_count": len(text),
                 "raw_char_count": len(raw),
                 "tag_count": parser.tag_count,
+                # How much of the text came from alt attributes rather than
+                # from the body. Lets a later look tell "a page of pictures,
+                # described" apart from "a page of prose".
+                "attribute_chunks": parser.attribute_chunks,
             },
         )
 
