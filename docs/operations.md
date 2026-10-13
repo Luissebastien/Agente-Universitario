@@ -480,9 +480,28 @@ sudo ls -lh /var/lib/agente-u/agente_u-before-purge-*.sqlite3
 ```
 
 Para deshacer una purga, ese archivo es la base de antes: párala, cópiala
-encima y arranca. Los **originales descargados no están en ese backup** — se
-vuelven a bajar de Moodle en el siguiente ciclo, mientras el curso siga
-existiendo.
+encima y arranca. Usa el **nombre literal** que imprimió la purga, no un
+comodín (ver "Cuidado con los comodines" más abajo).
+
+Los **originales descargados no están en ese backup** — se vuelven a bajar de
+Moodle en el siguiente ciclo, mientras el curso siga existiendo. Si quieres
+poder volver al estado exacto, guárdalos aparte **antes** de purgar.
+
+### Probado de punta a punta
+
+Ensayado contra producción el **2026-10-13**, con el trimestre en curso:
+purga completa, verificación de que no quedó nada, restauración desde el
+backup que la propia purga escribió, y comprobación de que los recuentos
+volvían a coincidir.
+
+```
+antes:      2155 filas, 260 ficheros (121.4 MB)
+tras purgar:   0 filas,   0 ficheros
+restaurado: 2155 filas, 260 ficheros
+```
+
+El ensayo en seco (`--purge` sin `--yes`) se puede correr **con el servicio
+encendido**: solo cuenta filas. La purga en sí exige pararlo.
 
 ---
 
@@ -506,12 +525,78 @@ sincronización. La base de datos es lo único irrecuperable.
 
 ### Restaurar
 
+**Verificado en producción el 2026-10-13**: purga completa y restauración, con
+los recuentos coincidiendo exactamente antes y después.
+
+Primero, ver qué hay. Fíjate en el `sudo` delante del `ls`:
+
+```sh
+sudo ls -lht /var/backups/agente-u/
+```
+
+Luego restaurar, **con el nombre literal del archivo**:
+
 ```sh
 sudo systemctl stop agente-u
 sudo -u agente-u sh -c 'gunzip -c /var/backups/agente-u/agente_u-<fecha>.sqlite3.gz \
     > /var/lib/agente-u/agente_u.sqlite3'
+```
+
+Comprobar qué tiene la base restaurada, antes de arrancar:
+
+```sh
+sudo -u agente-u /opt/agente-u/.venv/bin/python -m scheduler \
+    --config /etc/agente-u/scheduler.toml --purge
+```
+
+Ese comando **no borra nada sin `--yes`**; aquí sirve de recuento. Compara el
+total con el que esperabas de la copia.
+
+```sh
 sudo systemctl start agente-u
 ```
+
+### Cuidado con los comodines
+
+`/var/lib/agente-u` está en modo 700 y pertenece a `agente-u`, así que **tu
+shell no puede expandir un `*` ahí dentro** — ni siquiera anteponiendo `sudo`,
+porque la expansión ocurre antes de que `sudo` arranque. Esto falla:
+
+```sh
+sudo -u agente-u cp /var/lib/agente-u/agente_u-before-purge-*.sqlite3 ...
+# cp: cannot stat '...-*.sqlite3': No such file or directory
+```
+
+Usa el nombre completo, o deja que la expansión la haga root:
+
+```sh
+sudo sh -c 'ls -lh /var/lib/agente-u/agente_u-before-purge-*.sqlite3'
+```
+
+### Los originales no están en el backup
+
+La copia contiene **solo la base de datos**. Los ~120 MB de originales
+descargados no, y eso tiene dos consecuencias:
+
+- Tras restaurar, el siguiente ciclo **vuelve a descargar** lo que falte de
+  Moodle. Funciona mientras el curso siga existiendo.
+- Si necesitas el estado exacto —por ejemplo para ensayar una restauración—
+  guárdalos aparte antes:
+
+```sh
+sudo tar czf /var/tmp/originals.tar.gz -C /var/lib/agente-u originals
+sudo tar xzf /var/tmp/originals.tar.gz -C /var/lib/agente-u
+sudo chown -R agente-u:agente-u /var/lib/agente-u/originals
+```
+
+Ese `chown` no es opcional: `tar` ejecutado como root restaura la propiedad
+guardada en el archivo, y si los ficheros quedan como `root` el servicio no
+puede leer sus propios datos.
+
+El número de ficheros **no coincide** con el de `resource_versions`: el almacén
+está direccionado por contenido, así que dos recursos con contenido idéntico
+comparten uno solo. En la prueba del 13 de octubre: 290 versiones, 260
+ficheros.
 
 ---
 
