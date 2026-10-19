@@ -18,7 +18,7 @@ from ingestion.storage import Storage, StorageError
 logger = logging.getLogger(__name__)
 
 _VALID_DEPTHS = {"basic", "deep"}
-_UNSUPPORTED_EXTRACTOR_NAME = "unsupported"
+UNSUPPORTED_EXTRACTOR_NAME = "unsupported"
 _UNSUPPORTED_EXTRACTOR_VERSION = "n/a"
 
 # Bounded automatic retry of failed (non-"unsupported") attempts: transient
@@ -115,7 +115,7 @@ class Extraction:
                 version.id,
                 depth,
                 f"unsupported format (mimetype={version.mimetype!r}, extension={extension!r})",
-                extractor_name=_UNSUPPORTED_EXTRACTOR_NAME,
+                extractor_name=UNSUPPORTED_EXTRACTOR_NAME,
                 extractor_version=_UNSUPPORTED_EXTRACTOR_VERSION,
                 metadata={"mimetype": version.mimetype, "size_bytes": version.size_bytes},
             )
@@ -158,7 +158,7 @@ class Extraction:
         """Current (latest) versions still needing extraction at `depth`, never
         historical ones - see extraction_repository.get_pending_version_ids."""
         return extraction_repo.get_pending_version_ids(
-            self._conn, depth, MAX_FAILED_ATTEMPTS, _UNSUPPORTED_EXTRACTOR_NAME
+            self._conn, depth, MAX_FAILED_ATTEMPTS, UNSUPPORTED_EXTRACTOR_NAME
         )
 
     def extract_pending(

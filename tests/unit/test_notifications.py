@@ -1,8 +1,11 @@
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from database import moodle_repository as repo
+from database import moodle_repository as repo_moodle
+from database import notification_repository as repo
 from database.db import connect
 from moodle.models import Assignment, AssignmentSubmissionStatus, Course
 from notifications.models import NOTIFICATION_JOB_FAILED, Notification
@@ -99,7 +102,7 @@ class NotificationServiceTests(unittest.TestCase):
         self.provider = RecordingProvider()
         self.service = NotificationService(self.conn, self.provider, TZ, lambda: RULES,
                                            clock=lambda: self.now)
-        repo.upsert_courses(self.conn, [Course(id=1, shortname="ED", fullname="MATEMATICA BASICA",
+        repo_moodle.upsert_courses(self.conn, [Course(id=1, shortname="ED", fullname="MATEMATICA BASICA",
                                                category=None, visible=True, progress=None,
                                                startdate=None, enddate=None)])
         # The "latest successful sync" started just before the assignments were upserted.
@@ -110,11 +113,11 @@ class NotificationServiceTests(unittest.TestCase):
 
     def add_assignment(self, assignment_id: int, due_in_hours: float, status: str | None = "new") -> None:
         due = int((self.now + timedelta(hours=due_in_hours)).timestamp())
-        repo.upsert_assignments(self.conn, [Assignment(id=assignment_id, course_id=1, name=f"Tarea {assignment_id}",
+        repo_moodle.upsert_assignments(self.conn, [Assignment(id=assignment_id, course_id=1, name=f"Tarea {assignment_id}",
                                                        duedate=due, allowsubmissionsfromdate=None,
                                                        cutoffdate=None, grade=None)])
         if status is not None:
-            repo.upsert_assignment_submission_status(self.conn, AssignmentSubmissionStatus(
+            repo_moodle.upsert_assignment_submission_status(self.conn, AssignmentSubmissionStatus(
                 assignment_id=assignment_id, submission_status=status, grading_status=None,
                 cansubmit=True, submitted_at=None))
 
@@ -247,11 +250,11 @@ class NotificationServiceTests(unittest.TestCase):
                          datetime.fromtimestamp(int(local_due.timestamp()), timezone.utc).isoformat())
 
     def test_a_name_with_braces_is_delivered_as_written(self) -> None:
-        repo.upsert_assignments(self.conn, [Assignment(
+        repo_moodle.upsert_assignments(self.conn, [Assignment(
             id=1, course_id=1, name="Taller {1} de practica",
             duedate=int((self.now + timedelta(hours=10)).timestamp()),
             allowsubmissionsfromdate=None, cutoffdate=None, grade=None)])
-        repo.upsert_assignment_submission_status(self.conn, AssignmentSubmissionStatus(
+        repo_moodle.upsert_assignment_submission_status(self.conn, AssignmentSubmissionStatus(
             assignment_id=1, submission_status="new", grading_status=None,
             cansubmit=True, submitted_at=None))
 
@@ -273,5 +276,81 @@ class NotificationServiceTests(unittest.TestCase):
         self.assertEqual(service.pending(self.sync_started), [])
 
 
+class DeduplicationSurvivesRestartTests(unittest.TestCase):
+    """The record of what was already sent lives in SQLite, not in memory.
+
+    If it did not survive a restart, every redeploy would re-announce every
+    deadline of the term. The property holds by construction; this closes it
+    with an actual restart rather than an argument about one.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self._tmp.name) / "agente_u.sqlite3"
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def test_a_sent_notification_is_still_recorded_after_reopening(self) -> None:
+        first = connect(self.path)
+        try:
+            repo.record_sent(first, "assignment_due_24h", "assignment:104926",
+                             "2026-10-14T03:59:00+00:00", "2026-10-13T03:00:00+00:00")
+            self.assertTrue(repo.was_sent(first, "assignment_due_24h", "assignment:104926",
+                                          "2026-10-14T03:59:00+00:00"))
+        finally:
+            first.close()  # the process ends here
+
+        second = connect(self.path)  # and starts again
+        try:
+            self.assertTrue(repo.was_sent(second, "assignment_due_24h", "assignment:104926",
+                                          "2026-10-14T03:59:00+00:00"))
+            # Still only the one row: reopening re-runs the schema, which must
+            # not disturb what is already stored.
+            self.assertEqual(
+                second.execute("SELECT COUNT(*) AS n FROM notifications_sent").fetchone()["n"], 1)
+        finally:
+            second.close()
+
+    def test_the_service_does_not_resend_after_a_restart(self) -> None:
+        """End to end: same assignment, same deadline, new process."""
+        before = connect(self.path)
+        try:
+            provider = RecordingProvider()
+            self.seed(before)
+            service = NotificationService(before, provider, TZ, lambda: RULES,
+                                          clock=lambda: NOW)
+            service.send_pending(self.sync_started)
+            self.assertEqual(len(provider.sent), 1)
+        finally:
+            before.close()
+
+        after = connect(self.path)
+        try:
+            provider = RecordingProvider()
+            service = NotificationService(after, provider, TZ, lambda: RULES,
+                                          clock=lambda: NOW)
+            result = service.send_pending(self.sync_started)
+        finally:
+            after.close()
+
+        self.assertEqual(provider.sent, [])
+        self.assertEqual(result.pending, 0)
+
+    def seed(self, conn) -> None:
+        repo_moodle.upsert_courses(conn, [Course(
+            id=1, shortname="ED", fullname="MATEMATICA BASICA", category=None,
+            visible=True, progress=None, startdate=None, enddate=None)])
+        due = int((NOW + timedelta(hours=10)).timestamp())
+        repo_moodle.upsert_assignments(conn, [Assignment(
+            id=1, course_id=1, name="Tarea 1", duedate=due,
+            allowsubmissionsfromdate=None, cutoffdate=None, grade=None)])
+        repo_moodle.upsert_assignment_submission_status(conn, AssignmentSubmissionStatus(
+            assignment_id=1, submission_status="new", grading_status=None,
+            cansubmit=True, submitted_at=None))
+        self.sync_started = (datetime.now(timezone.utc) - timedelta(seconds=5)).isoformat()
+
+
 if __name__ == "__main__":
+
     unittest.main()

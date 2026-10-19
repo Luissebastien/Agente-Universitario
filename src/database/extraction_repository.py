@@ -108,6 +108,57 @@ def get_pending_version_ids(
     return [row["id"] for row in rows]
 
 
+def list_abandoned_versions(
+    conn: sqlite3.Connection,
+    depth: str,
+    max_failed_attempts: int,
+    unsupported_extractor_name: str,
+) -> list[sqlite3.Row]:
+    """Current versions that used up their extraction attempts, worst first.
+
+    The exact complement of what get_pending_version_ids() still offers: same
+    latest-version and no-successful-attempt conditions, with the failure
+    count at or above the limit instead of below it. Derived from one
+    definition rather than two, so a version can never be both pending here
+    and abandoned there.
+
+    These are the documents the system has quietly stopped trying to read.
+    Nothing retries them and nothing else reports them, which is why they are
+    surfaced in --status - the same reason ingestion_deferrals exists.
+    """
+    return conn.execute(
+        """
+        SELECT rv.id AS version_id, rv.size_bytes, rv.mimetype,
+               r.name AS name, r.course_id AS course_id,
+               COUNT(f.id) AS failures,
+               MAX(f.extracted_at) AS last_attempt_at,
+               (SELECT f2.error_reason FROM extracted_documents f2
+                 WHERE f2.resource_version_id = rv.id AND f2.depth = :depth
+                   AND f2.status = 'failed'
+                 ORDER BY f2.id DESC LIMIT 1) AS last_error
+        FROM resource_versions rv
+        JOIN resources r ON r.id = rv.resource_id
+        JOIN extracted_documents f
+          ON f.resource_version_id = rv.id AND f.depth = :depth AND f.status = 'failed'
+        WHERE rv.version_number = (
+                SELECT MAX(v2.version_number) FROM resource_versions v2
+                WHERE v2.resource_id = rv.resource_id)
+          AND NOT EXISTS (
+                SELECT 1 FROM extracted_documents ed
+                WHERE ed.resource_version_id = rv.id AND ed.depth = :depth
+                  AND (ed.status = 'done' OR ed.extractor_name = :unsupported))
+        GROUP BY rv.id
+        HAVING COUNT(f.id) >= :max_failed
+        ORDER BY COUNT(f.id) DESC, rv.id
+        """,
+        {
+            "depth": depth,
+            "max_failed": max_failed_attempts,
+            "unsupported": unsupported_extractor_name,
+        },
+    ).fetchall()
+
+
 def get_latest_extraction(
     conn: sqlite3.Connection, resource_version_id: int, depth: str
 ) -> ExtractedDocument | None:

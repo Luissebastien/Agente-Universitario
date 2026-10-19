@@ -192,6 +192,28 @@ sudo -u agente-u sqlite3 -column -header /var/lib/agente-u/agente_u.sqlite3 \
 Es la consulta que sirve para **recalibrar el umbral**: muestra qué se saltó,
 cuánto pesaba y qué límite estaba vigente entonces.
 
+**Documentos que agotaron sus intentos de extracción** (también salen al final
+de `--status`):
+
+Tras tres fallos, una versión deja de ofrecerse para extracción y no se vuelve
+a intentar. Sin esta lista el job seguiría informando `0 still pending` y
+parecería sano, cuando en realidad hay contenido que nunca se leyó.
+
+```
+Not extracted (1 document(s) gave up after 3 attempts):
+  guia-corrupta.pdf - 2.3 MB mimetype='application/pdf' course=1
+      3 failure(s), last at 2026-10-13T10:22:07-04:00: PdfReadError: EOF marker not found
+```
+
+Un formato que el sistema no sabe leer **no** aparece aquí: eso es `unsupported`,
+un estado distinto y benigno. Esta lista es solo para lo que se intentó leer y
+no se pudo.
+
+Para volver a intentarlo tras corregir la causa —por ejemplo si el profesor
+sustituyó el archivo— basta con que Moodle cambie su `timemodified`: la
+ingestión creará una versión nueva, y una versión nueva empieza con sus
+intentos intactos.
+
 **Volumen almacenado:**
 
 ```sh

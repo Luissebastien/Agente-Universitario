@@ -9,11 +9,16 @@ import sys
 from collections.abc import Callable
 from datetime import datetime, timezone
 
+from database import extraction_repository as extraction_repo
 from database import ingestion_repository as ingestion_repo
 from database import reminder_repository as reminder_repo
 from database import scheduler_repository as history
 from database.db import connect
-from extraction.extract import Extraction
+from extraction.extract import (
+    MAX_FAILED_ATTEMPTS,
+    UNSUPPORTED_EXTRACTOR_NAME,
+    Extraction,
+)
 from extraction.ocr import DoctrOcrEngine
 from ingestion.storage import FilesystemStorage
 from moodle.client import MoodleClient
@@ -29,6 +34,7 @@ from scheduler.config import (
     SchedulerConfig,
 )
 from scheduler.jobs import (
+    EXTRACTION_DEPTH,
     TRIGGER_MANUAL,
     ExtractionJob,
     IngestionJob,
@@ -203,6 +209,7 @@ def print_status(config: SchedulerConfig) -> int:
                 print(f"  last failure: {_local(failure.started_at, tz)}: {failure.error}")
         _print_reminders(conn, config)
         _print_deferrals(conn, tz)
+        _print_abandoned_extractions(conn, tz)
     finally:
         conn.close()
     return EXIT_OK
@@ -283,6 +290,30 @@ def _print_reminders(conn: sqlite3.Connection, config: SchedulerConfig) -> None:
         print(f"  [{rule.id}] when between {lower // 3600}h and "
               f"{rule.offset_seconds // 3600}h remain -> {rule.notification_type}")
         lower = rule.offset_seconds
+
+
+def _print_abandoned_extractions(conn: sqlite3.Connection, tz) -> None:
+    """Documents the system has stopped trying to read, and why.
+
+    A version that fails its allowed attempts stops being offered for
+    extraction and is never mentioned again: the job reports '0 still
+    pending' and looks healthy. Printed here for the same reason deferrals
+    are - these are the only places where the system would otherwise imply
+    that content was processed when it was not.
+    """
+    rows = extraction_repo.list_abandoned_versions(
+        conn, EXTRACTION_DEPTH, MAX_FAILED_ATTEMPTS, UNSUPPORTED_EXTRACTOR_NAME
+    )
+    if not rows:
+        return
+    print(f"\nNot extracted ({len(rows)} document(s) gave up after "
+          f"{MAX_FAILED_ATTEMPTS} attempts):")
+    for row in rows:
+        size = f"{row['size_bytes'] / 1048576:.1f} MB" if row["size_bytes"] else "size unknown"
+        print(f"  {row['name']} - {size} mimetype={row['mimetype']!r} "
+              f"course={row['course_id']}")
+        print(f"      {row['failures']} failure(s), last at "
+              f"{_local(row['last_attempt_at'], tz)}: {row['last_error']}")
 
 
 def _print_deferrals(conn: sqlite3.Connection, tz) -> None:
